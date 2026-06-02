@@ -86,10 +86,13 @@ public:
 	 * WARNING! No checks are done, so be careful
 	 */
 	void PostLoad(int serverFrameNum);
+	void ResetDemoPlaybackToFrame(int frameNum);
 
 	void CreateNewFrame(bool fromServerThread, bool fixedFrameTime);
 
 	void SetGamePausable(const bool arg);
+	bool IsPaused() const { return isPaused; }
+	void SetPaused(const bool paused) { isPaused = paused; }
 	void SetReloading(const bool arg) { reloadingServer = arg; }
 
 	bool PreSimFrame() const { return (serverFrameNum == -1); }

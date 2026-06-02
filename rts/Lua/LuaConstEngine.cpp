@@ -58,6 +58,11 @@ bool LuaConstEngine::PushEntries(lua_State* L)
 	LuaPushNamedString(L, "commitsNumber"  , SpringVersion::GetCommits()   );
 	LuaPushNamedString(L, "buildFlags"     , SpringVersion::GetAdditional());
 	LuaPushNamedNumber(L, "wordSize", (!CLuaHandle::GetHandleSynced(L))? Platform::NativeWordSize() * 8: 0);
+#ifdef SYNCCHECK
+	LuaPushNamedBool(L, "hasSyncChecksums", true);
+#else
+	LuaPushNamedBool(L, "hasSyncChecksums", false);
+#endif
 
 	if (!CLuaHandle::GetHandleSynced(L))
 		LuaPushNamedBool(L, "isHeadless", SpringVersion::IsHeadless());

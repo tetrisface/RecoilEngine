@@ -120,6 +120,7 @@
 #include "System/SpringExitCode.h"
 #include "System/SpringMath.h"
 #include "System/FileSystem/FileSystem.h"
+#include "System/LoadSave/CregLoadSaveHandler.h"
 #include "System/LoadSave/LoadSaveHandler.h"
 #include "System/LoadSave/DemoRecorder.h"
 #include "System/Log/ILog.h"
@@ -136,6 +137,7 @@
 
 #include "fmt/ranges.h"
 
+#include <exception>
 
 #undef CreateDirectory
 
@@ -861,7 +863,8 @@ void CGame::LoadLua(bool dryRun, bool onlyUnsynced)
 	decltype(&CLuaRules::LoadFreeHandler) loaders[] = {CLuaRules::LoadFreeHandler, CLuaGaia::LoadFreeHandler};
 
 	for (int i = 0; i < 2; i++) {
-		loadscreen->SetLoadMessage("Loading " + prefix + names[i]);
+		if (loadscreen != nullptr)
+			loadscreen->SetLoadMessage("Loading " + prefix + names[i]);
 
 		if (onlyUnsynced && handles[i] != nullptr) {
 			handles[i]->InitUnsynced();
@@ -873,7 +876,8 @@ void CGame::LoadLua(bool dryRun, bool onlyUnsynced)
 	LEAVE_SYNCED_CODE();
 
 	if (!dryRun) {
-		loadscreen->SetLoadMessage("Loading LuaUI");
+		if (loadscreen != nullptr)
+			loadscreen->SetLoadMessage("Loading LuaUI");
 		auto lock = CLoadLock::GetUniqueLock();
 		CLuaUI::LoadFreeHandler();
 	}
@@ -2130,6 +2134,86 @@ void CGame::Save(std::string&& fileName, std::string&& saveArgs)
 }
 
 
+bool CGame::LoadReplayCheckpoint(const std::string& checkpointPath, int checkpointFrame, int targetFrame)
+{
+	RECOIL_DETAILED_TRACY_ZONE;
+
+	if (checkpointPath.empty())
+		return false;
+
+	const bool wasSyncedPaused = (gs != nullptr && gs->paused);
+	const bool wasServerPaused = (gameServer != nullptr && gameServer->IsPaused());
+
+	try {
+		CCregLoadSaveHandler loadSaveHandler;
+
+		if (!loadSaveHandler.LoadGameStartInfo(checkpointPath)) {
+			LOG_L(L_WARNING,
+				"[ReplayCheckpoint] checkpoint frame %d is incompatible with this engine build: %s",
+				checkpointFrame,
+				checkpointPath.c_str()
+			);
+			return false;
+		}
+
+		{
+			auto lock = CLoadLock::GetUniqueLock();
+			loadSaveHandler.LoadGame();
+		}
+
+		LoadLua(false, true);
+		loadSaveHandler.LoadAIData();
+
+		if (!gameSetup->hostDemo && !uiGroupHandlers.empty()) {
+			const std::vector<uint8_t>& localAIs = skirmishAIHandler.GetSkirmishAIsByPlayer(gu->myPlayerNum);
+
+			for (uint8_t localAI: localAIs)
+				skirmishAIHandler.PostLoadSkirmishAI(localAI);
+		}
+
+		PostLoad();
+
+		if (gameServer != nullptr && gameServer->GetDemoReader() != nullptr)
+			gameServer->ResetDemoPlaybackToFrame((gs != nullptr) ? gs->frameNum : checkpointFrame);
+
+		if (clientNet != nullptr) {
+			const unsigned int droppedPackets = clientNet->ClearWaitingServerPackets();
+			if (droppedPackets > 0)
+				LOG("[ReplayCheckpoint] dropped %u queued server packets after checkpoint restore", droppedPackets);
+		}
+
+		if (gs != nullptr)
+			gs->paused = wasSyncedPaused;
+
+		if (gameServer != nullptr)
+			gameServer->SetPaused(wasServerPaused);
+
+		LOG("[ReplayCheckpoint] restored checkpoint frame %d for requested frame %d, current frame %d, paused %d from %s",
+			checkpointFrame,
+			targetFrame,
+			(gs != nullptr) ? gs->frameNum : -1,
+			(gs != nullptr && gs->paused) ? 1 : 0,
+			checkpointPath.c_str()
+		);
+		return true;
+	} catch (const content_error& ex) {
+		LOG_L(L_ERROR, "[ReplayCheckpoint] content error while restoring %s: %s", checkpointPath.c_str(), ex.what());
+	} catch (const std::exception& ex) {
+		LOG_L(L_ERROR, "[ReplayCheckpoint] exception while restoring %s: %s", checkpointPath.c_str(), ex.what());
+	} catch (...) {
+		LOG_L(L_ERROR, "[ReplayCheckpoint] unknown error while restoring %s", checkpointPath.c_str());
+	}
+
+	if (gs != nullptr)
+		gs->paused = wasSyncedPaused;
+
+	if (gameServer != nullptr)
+		gameServer->SetPaused(wasServerPaused);
+
+	return false;
+}
+
+
 
 
 bool CGame::ProcessCommandText(const std::string& command) {
@@ -2204,4 +2288,3 @@ const ActionList& CGame::GetLastActionList()
 {
 	return gameInputReceiver.lastActionList;
 }
-

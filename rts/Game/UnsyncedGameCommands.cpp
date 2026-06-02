@@ -1,6 +1,7 @@
 /* This file is part of the Spring engine (GPL v2 or later), see LICENSE.html */
 #include <array>
 #include <functional>
+#include <sstream>
 #include <tuple>
 
 #include "UnsyncedGameCommands.h"
@@ -105,6 +106,7 @@
 #include "System/Log/ILog.h"
 #include "System/Config/ConfigHandler.h"
 #include "System/FileSystem/SimpleParser.h"
+#include "System/LoadSave/ReplayCheckpointHandler.h"
 #include "System/Sound/ISound.h"
 #include "System/Sound/ISoundChannels.h"
 #include "System/Sync/DumpState.h"
@@ -3753,6 +3755,64 @@ private:
 };
 
 
+class ReplayCheckpointActionExecutor : public IUnsyncedActionExecutor {
+public:
+	ReplayCheckpointActionExecutor() : IUnsyncedActionExecutor(
+		"ReplayCheckpoint",
+		"Save or restore replay checkpoints for replay timeline scrubbing"
+	) {
+	}
+
+	bool Execute(const UnsyncedAction& action) const final {
+		std::vector<std::string> args = CSimpleParser::Tokenize(action.GetArgs());
+
+		if (args.empty()) {
+			LOG("usage: /%s save [-y] | /%s load <frame>", GetCommand().c_str(), GetCommand().c_str());
+			return false;
+		}
+
+		const std::string commandLower = StringToLower(args[0]);
+
+		if (commandLower == "save") {
+			std::string saveArgs;
+
+			for (size_t i = 1; i < args.size(); ++i) {
+				if (args[i] == "-y") {
+					saveArgs = "-y";
+					continue;
+				}
+
+				LOG_L(L_WARNING, "/%s save: unknown argument \"%s\"", GetCommand().c_str(), args[i].c_str());
+				return false;
+			}
+
+			return ReplayCheckpointHandler::QueueSaveCurrentFrame(saveArgs == "-y");
+		}
+
+		if (commandLower == "load") {
+			if (args.size() != 2) {
+				LOG("usage: /%s load <frame>", GetCommand().c_str());
+				return false;
+			}
+
+			std::istringstream frameStream(args[1]);
+			int targetFrame = -1;
+			frameStream >> targetFrame;
+
+			if (!frameStream || targetFrame < 0) {
+				LOG_L(L_WARNING, "/%s load: invalid frame \"%s\"", GetCommand().c_str(), args[1].c_str());
+				return false;
+			}
+
+			return ReplayCheckpointHandler::RequestHotLoadFrame(targetFrame);
+		}
+
+		LOG("usage: /%s save [-y] | /%s load <frame>", GetCommand().c_str(), GetCommand().c_str());
+		return false;
+	}
+};
+
+
 
 class ReloadShadersActionExecutor : public IUnsyncedActionExecutor {
 public:
@@ -4225,6 +4285,7 @@ void UnsyncedGameCommands::AddDefaultActionExecutors()
 	AddActionExecutor(AllocActionExecutor<DumpRNGActionExecutor>());
 	AddActionExecutor(AllocActionExecutor<SaveActionExecutor>(true));
 	AddActionExecutor(AllocActionExecutor<SaveActionExecutor>(false));
+	AddActionExecutor(AllocActionExecutor<ReplayCheckpointActionExecutor>());
 	AddActionExecutor(AllocActionExecutor<ReloadShadersActionExecutor>());
 	AddActionExecutor(AllocActionExecutor<ReloadTexturesActionExecutor>());
 	AddActionExecutor(AllocActionExecutor<DumpAtlasActionExecutor>());

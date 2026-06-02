@@ -99,6 +99,7 @@ public:
 	void ParseInputTextGeometry(const std::string& geo);
 
 	void Save(std::string&& fileName, std::string&& saveArgs);
+	bool LoadReplayCheckpoint(const std::string& checkpointPath, int checkpointFrame, int targetFrame);
 
 	void ResizeEvent() override;
 
@@ -233,4 +234,3 @@ private:
 extern CGame* game;
 
 #endif // _GAME_H
-

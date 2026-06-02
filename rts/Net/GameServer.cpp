@@ -293,6 +293,39 @@ void CGameServer::PostLoad(int newServerFrameNum)
 	}
 }
 
+void CGameServer::ResetDemoPlaybackToFrame(int frameNum)
+{
+	std::lock_guard<spring::recursive_mutex> scoped_lock(gameServerMutex);
+
+	if (demoReader == nullptr || frameNum < 0)
+		return;
+
+	const float targetModGameTime = frameNum * INV_GAME_SPEED;
+
+	demoReader.reset(new CDemoReader(myGameSetup->demoName, 0.1f));
+
+	// Discard demo packets up to the restored frame. The checkpoint already
+	// contains their sim effects; rebroadcasting them would catch the client up.
+	while (netcode::RawPacket* packet = demoReader->GetData(targetModGameTime + 0.001f)) {
+		delete packet;
+	}
+
+	serverFrameNum = frameNum;
+	gameTime = GetDemoTime();
+	modGameTime = targetModGameTime;
+	lastUpdate = spring_gettime();
+	lastNewFrameTick = lastUpdate;
+	isPaused = true;
+	syncErrorFrame = 0;
+	outstandingSyncFrames.clear();
+
+	for (GameParticipant& p: players) {
+		p.lastFrameResponse = frameNum;
+	}
+
+	LOG("[GameServer] reset demo playback to frame %d, modGameTime %.3f", frameNum, modGameTime);
+}
+
 
 void CGameServer::Reload(const std::shared_ptr<const CGameSetup> newGameSetup)
 {
@@ -2578,6 +2611,10 @@ bool CGameServer::HasFinished() const
 void CGameServer::CreateNewFrame(bool fromServerThread, bool fixedFrameTime)
 {
 	if (demoReader != nullptr) {
+		std::unique_lock<spring::recursive_mutex> lck(gameServerMutex);
+		if (isPaused && !fixedFrameTime)
+			return;
+
 		CheckSync();
 		SendDemoData(-1);
 		return;
@@ -3102,4 +3139,3 @@ uint8_t CGameServer::ReserveSkirmishAIId()
 	freeSkirmishAIs.pop_back();
 	return id;
 }
-

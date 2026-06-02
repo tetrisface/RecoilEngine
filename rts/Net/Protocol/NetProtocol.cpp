@@ -142,6 +142,19 @@ std::shared_ptr<const netcode::RawPacket> CNetProtocol::GetData(int frameNum)
 	return ret;
 }
 
+unsigned int CNetProtocol::ClearWaitingServerPackets()
+{
+	std::lock_guard<spring::spinlock> lock(serverConnMutex);
+
+	unsigned int count = 0;
+	while (serverConnPtr->Peek(0) != nullptr) {
+		serverConnPtr->DeleteBufferPacketAt(0);
+		++count;
+	}
+
+	return count;
+}
+
 
 void CNetProtocol::Send(const netcode::RawPacket* pkt) { Send(std::shared_ptr<const netcode::RawPacket>(pkt)); }
 void CNetProtocol::Send(std::shared_ptr<const netcode::RawPacket> pkt)
@@ -184,4 +197,3 @@ void CNetProtocol::ResetDemoRecorder() { SetDemoRecorder({}); }
 
 unsigned int CNetProtocol::GetNumWaitingServerPackets() const { return (serverConnPtr->GetPacketQueueSize()); }
 unsigned int CNetProtocol::GetNumWaitingPingPackets() const { return (serverConnPtr->GetNumQueuedPings()); }
-

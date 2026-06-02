@@ -75,6 +75,7 @@
 #include "System/Sound/ISound.h"
 #include "System/Sound/ISoundChannels.h"
 #include "System/StringUtil.h"
+#include "System/Sync/SyncChecker.h"
 #include "System/Misc/SpringTime.h"
 #include "System/ScopedResource.h"
 #include "System/Math/NURBS.h"
@@ -237,6 +238,7 @@ bool LuaUnsyncedRead::PushEntries(lua_State* L)
 	REGISTER_LUA_CFUNC(GetFPS);
 	REGISTER_LUA_CFUNC(GetGameSpeed);
 	REGISTER_LUA_CFUNC(GetGameState);
+	REGISTER_LUA_CFUNC(GetPrevFrameSyncChecksum);
 
 	REGISTER_LUA_CFUNC(GetActiveCommand);
 	REGISTER_LUA_CFUNC(GetDefaultCommand);
@@ -3630,6 +3632,21 @@ int LuaUnsyncedRead::GetGameState(lua_State* L)
 	lua_pushboolean(L, game->IsClientPaused()); // local state; included for demos
 	lua_pushboolean(L, game->IsSimLagging(maxLatency));
 	return 4;
+}
+
+/***
+ *
+ * @function Spring.GetPrevFrameSyncChecksum
+ * @return integer? checksum
+ */
+int LuaUnsyncedRead::GetPrevFrameSyncChecksum(lua_State* L)
+{
+#ifdef SYNCCHECK
+	lua_pushinteger(L, CSyncChecker::GetChecksum());
+	return 1;
+#else
+	return 0;
+#endif
 }
 
 

@@ -81,6 +81,7 @@ public:
 	 * When a demo recorder is present it will be recorded.
 	 */
 	std::shared_ptr<const netcode::RawPacket> GetData(int framenum);
+	unsigned int ClearWaitingServerPackets();
 
 	/**
 	 * @brief Send a message to the server
@@ -129,4 +130,3 @@ private:
 extern CNetProtocol* clientNet;
 
 #endif // NET_PROTOCOL_H
-
