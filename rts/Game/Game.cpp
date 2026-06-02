@@ -122,6 +122,7 @@
 #include "System/FileSystem/FileSystem.h"
 #include "System/LoadSave/CregLoadSaveHandler.h"
 #include "System/LoadSave/LoadSaveHandler.h"
+#include "System/LoadSave/ReplayCheckpointHandler.h"
 #include "System/LoadSave/DemoRecorder.h"
 #include "System/Log/ILog.h"
 #include "System/Platform/Misc.h"
@@ -945,6 +946,9 @@ void CGame::PostLoad()
 	if (gameServer != nullptr) {
 		gameServer->PostLoad(gs->frameNum);
 	}
+
+	if (gameSetup->hostDemo)
+		ReplayCheckpointHandler::InitPlaybackContext(gameSetup->demoName);
 }
 
 
@@ -1823,6 +1827,7 @@ void CGame::SimFrame() {
 	DumpState(-1, -1, 1, std::nullopt);
 
 	ASSERT_SYNCED(gsRNG.GetGenState());
+	ReplayCheckpointHandler::UpdateRecordFrame(gs->frameNum);
 	LEAVE_SYNCED_CODE();
 }
 
@@ -1864,6 +1869,8 @@ void CGame::GameEnd(const std::vector<unsigned char>& winningAllyTeams, bool tim
 #endif // HEADLESS
 
 	CDemoRecorder* record = clientNet->GetDemoRecorder();
+
+	ReplayCheckpointHandler::FinalizeRecordingBundle();
 
 	if (!record->IsValid())
 		return;

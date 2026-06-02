@@ -6,6 +6,7 @@
 #include <memory>
 
 #include "DemoRecorder.h"
+#include "ReplayCheckpointHandler.h"
 #include "base64.h"
 #include "Game/GameVersion.h"
 #include "Sim/Misc/TeamStatistics.h"
@@ -47,14 +48,18 @@ CDemoRecorder::CDemoRecorder(const std::string& mapName, const std::string& modN
 
 CDemoRecorder::~CDemoRecorder()
 {
-	if (file == nullptr)
+	if (file == nullptr) {
+		ReplayCheckpointHandler::FinalizeRecordingBundle();
 		return;
+	}
 
 	WriteWinnerList();
 	WritePlayerStats();
 	WriteTeamStats();
 	WriteFileHeader(true);
 	WriteDemoFile();
+
+	ReplayCheckpointHandler::FinalizeRecordingBundle();
 }
 
 

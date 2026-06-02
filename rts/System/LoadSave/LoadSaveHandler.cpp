@@ -3,6 +3,7 @@
 #include "LoadSaveHandler.h"
 #include "CregLoadSaveHandler.h"
 #include "LuaLoadSaveHandler.h"
+#include "ReplayCheckpointHandler.h"
 #include "Game/GameSetup.h"
 #include "System/FileSystem/FileSystem.h"
 #include "System/Log/ILog.h"
@@ -28,11 +29,23 @@ bool ILoadSaveHandler::CreateSave(
 	const std::string& saveFile,
 	const std::string& saveArgs
 ) {
-	if (!FileSystem::CreateDirectory("Saves"))
+	if (saveFile.empty())
 		return false;
+
+	const std::string parentDir = FileSystem::GetDirectory(saveFile);
+	if (!parentDir.empty()) {
+		if (!FileSystem::CreateDirectory(parentDir)) {
+			ReplayCheckpointHandler::NotifySaveFailed();
+			return false;
+		}
+	} else if (!FileSystem::CreateDirectory("Saves")) {
+		ReplayCheckpointHandler::NotifySaveFailed();
+		return false;
+	}
 
 	if (saveArgs != "-y" && FileSystem::FileExists(saveFile)) {
 		LOG_L(L_WARNING, "[ILoadSaveHandler::%s] file \"%s\" already exists (use /save <filename> -y to override)", __func__, saveFile.c_str());
+		ReplayCheckpointHandler::NotifySaveFailed();
 		return false;
 	}
 
@@ -42,6 +55,8 @@ bool ILoadSaveHandler::CreateSave(
 	ls->SaveGame(saveFile);
 	LOG("[ILoadSaveHandler::%s] saved game to file \"%s\"", __func__, saveFile.c_str());
 	delete ls;
+
+	ReplayCheckpointHandler::NotifySaveCompleted(saveFile);
 	return true;
 }
 
