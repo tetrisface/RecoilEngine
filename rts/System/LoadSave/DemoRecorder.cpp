@@ -6,7 +6,6 @@
 #include <memory>
 
 #include "DemoRecorder.h"
-#include "ReplayCheckpointHandler.h"
 #include "base64.h"
 #include "Game/GameVersion.h"
 #include "Sim/Misc/TeamStatistics.h"
@@ -18,6 +17,10 @@
 #include "System/FileSystem/FileHandler.h"
 #include "System/Log/ILog.h"
 #include "System/Threading/ThreadPool.h"
+
+#ifndef DEDICATED
+#include "ReplayCheckpointHandler.h"
+#endif
 
 #ifdef CreateDirectory
 #undef CreateDirectory
@@ -31,6 +34,13 @@
 // server and client memory-streams
 static std::string demoStreams[2];
 static spring::mutex demoMutex;
+
+static void FinalizeReplayCheckpointBundle()
+{
+#ifndef DEDICATED
+	ReplayCheckpointHandler::FinalizeRecordingBundle();
+#endif
+}
 
 
 CDemoRecorder::CDemoRecorder(const std::string& mapName, const std::string& modName, bool serverDemo): isServerDemo(serverDemo)
@@ -49,7 +59,7 @@ CDemoRecorder::CDemoRecorder(const std::string& mapName, const std::string& modN
 CDemoRecorder::~CDemoRecorder()
 {
 	if (file == nullptr) {
-		ReplayCheckpointHandler::FinalizeRecordingBundle();
+		FinalizeReplayCheckpointBundle();
 		return;
 	}
 
@@ -59,7 +69,7 @@ CDemoRecorder::~CDemoRecorder()
 	WriteFileHeader(true);
 	WriteDemoFile();
 
-	ReplayCheckpointHandler::FinalizeRecordingBundle();
+	FinalizeReplayCheckpointBundle();
 }
 
 

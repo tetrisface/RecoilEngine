@@ -9,6 +9,7 @@
 #include "Net/Protocol/NetProtocol.h"
 #include "Sim/Misc/GlobalSynced.h"
 #include "System/Config/ConfigHandler.h"
+#include "System/CRC.h"
 #include "System/FileSystem/DataDirsAccess.h"
 #include "System/FileSystem/FileQueryFlags.h"
 #include "System/FileSystem/FileSystem.h"
@@ -34,6 +35,7 @@ namespace ReplayCheckpointHandler
 {
 
 static constexpr const char* BUNDLE_SUFFIX = ".replay-checkpoints";
+static constexpr const char* BUNDLE_PREFIX = "rcp_";
 static constexpr const char* SESSION_FILE = "session.json";
 
 struct RecordedCheckpoint {
@@ -64,7 +66,7 @@ static std::string ResolveDemoPath(const std::string& demoPath)
 	if (FileSystem::FileExists(demoPath))
 		return FileSystem::GetNormalizedPath(demoPath);
 
-	return dataDirsAccess.LocateFile(demoPath, FileQueryFlags::READ | FileQueryFlags::WRITE);
+	return dataDirsAccess.LocateFile(demoPath);
 }
 
 static std::string ResolveBundleDir(const std::string& demoPath)
@@ -73,7 +75,21 @@ static std::string ResolveBundleDir(const std::string& demoPath)
 	if (resolvedDemo.empty())
 		return "";
 
-	return resolvedDemo + BUNDLE_SUFFIX;
+	const std::string demoDir = FileSystem::GetDirectory(resolvedDemo);
+	const std::string demoFile = FileSystem::GetFilename(resolvedDemo);
+	if (demoFile.empty())
+		return resolvedDemo + BUNDLE_SUFFIX;
+
+	const uint32_t demoNameDigest = CRC::CalcDigest(demoFile.data(), demoFile.size());
+	const std::string bundleName =
+		std::string(BUNDLE_PREFIX) +
+		IntToString(static_cast<int>(demoNameDigest), "%08x") +
+		BUNDLE_SUFFIX;
+
+	if (demoDir.empty())
+		return bundleName;
+
+	return FileSystem::EnsurePathSepAtEnd(demoDir) + bundleName;
 }
 
 static std::string GetRecordingDemoPath()
@@ -315,6 +331,9 @@ bool RequestHotLoadFrame(int targetFrame)
 {
 	if (targetFrame < 0)
 		return false;
+
+	if (activeContext.mode != DemoContextMode::Playback && gameSetup != nullptr && gameSetup->hostDemo)
+		InitPlaybackContext(gameSetup->demoName);
 
 	if (activeContext.mode == DemoContextMode::Playback && !FileSystem::DirExists(activeContext.bundleDir)) {
 		LOG_L(L_WARNING,
