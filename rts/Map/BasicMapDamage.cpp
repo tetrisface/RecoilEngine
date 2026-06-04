@@ -17,6 +17,38 @@
 
 #include "System/Misc/TracyDefs.h"
 
+CR_BIND_DERIVED(CBasicMapDamage, IMapDamage, )
+CR_REG_METADATA(CBasicMapDamage, (
+	CR_MEMBER(explosionSquaresPool),
+	CR_MEMBER(explosionUpdateQueue),
+	CR_MEMBER(explSquaresPoolIdx),
+	CR_MEMBER(explUpdateQueueIdx)
+))
+
+CR_BIND(CBasicMapDamage::ExploBuilding, )
+CR_REG_METADATA(CBasicMapDamage::ExploBuilding, (
+	CR_MEMBER(id),
+	CR_MEMBER(dif),
+	CR_MEMBER(tx1),
+	CR_MEMBER(tx2),
+	CR_MEMBER(tz1),
+	CR_MEMBER(tz2)
+))
+
+CR_BIND(CBasicMapDamage::Explo, )
+CR_REG_METADATA(CBasicMapDamage::Explo, (
+	CR_MEMBER(pos),
+	CR_MEMBER(strength),
+	CR_MEMBER(radius),
+	CR_MEMBER(ttl),
+	CR_MEMBER(x1),
+	CR_MEMBER(x2),
+	CR_MEMBER(y1),
+	CR_MEMBER(y2),
+	CR_MEMBER(idx),
+	CR_MEMBER(buildings)
+))
+
 
 void CBasicMapDamage::Init()
 {
@@ -308,4 +340,3 @@ void CBasicMapDamage::Update()
 	explosionUpdateQueue.clear();
 	explUpdateQueueIdx = 0;
 }
-

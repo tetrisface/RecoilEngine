@@ -9,6 +9,8 @@
 
 class CBasicMapDamage : public IMapDamage
 {
+	CR_DECLARE(CBasicMapDamage)
+
 public:
 	void Explosion(const float3& pos, float strength, float radius, float& maxHeightDiff) override;
 	void RecalcArea(int x1, int x2, int y1, int y2) override;
@@ -29,6 +31,8 @@ private:
 	}
 
 	struct ExploBuilding {
+		CR_DECLARE_STRUCT(ExploBuilding)
+
 		/**
 		 * Searching for building pointers inside these on DependentDied
 		 * could be messy, so we use the id.
@@ -43,6 +47,8 @@ private:
 	};
 
 	struct Explo {
+		CR_DECLARE_STRUCT(Explo)
+
 		float3 pos;
 
 		float strength = 0.0f;

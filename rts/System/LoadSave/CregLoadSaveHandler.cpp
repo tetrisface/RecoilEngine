@@ -6,6 +6,7 @@
 #include "ExternalAI/SkirmishAIHandler.h"
 #include "ExternalAI/EngineOutHandler.h"
 #include "CregLoadSaveHandler.h"
+#include "Map/MapDamage.h"
 #include "Map/ReadMap.h"
 #include "Game/Game.h"
 #include "Game/GameSetup.h"
@@ -106,6 +107,8 @@ void CGameStateCollector::Serialize(creg::ISerializer* s)
 	s->SerializeObjectInstance(gameSetup, gameSetup->GetClass());
 	s->SerializeObjectInstance(game, game->GetClass());
 	s->SerializeObjectInstance(readMap, readMap->GetClass());
+	if (mapDamage != nullptr && !mapDamage->Disabled())
+		s->SerializeObjectInstance(mapDamage, mapDamage->GetClass());
 	s->SerializeObjectInstance(&quadField, quadField.GetClass());
 	s->SerializeObjectInstance(&unitHandler, unitHandler.GetClass());
 	s->SerializeObjectInstance(&globalUnitParams, globalUnitParams.GetClass());

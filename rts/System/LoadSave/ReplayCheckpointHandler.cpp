@@ -55,6 +55,8 @@ static std::vector<RecordedCheckpoint> recordedCheckpoints;
 static std::atomic<bool> saveInFlight = {false};
 static int lastAutoSaveFrame = -1;
 static int pendingHotLoadTargetFrame = -1;
+static bool pendingHotLoadWasSyncedPaused = false;
+static bool pendingHotLoadWasServerPaused = false;
 static spring_time lastAutoSaveWallTime = spring_gettime();
 static bool sessionFinalized = false;
 
@@ -264,6 +266,9 @@ void ClearActiveContext()
 	recordedCheckpoints.clear();
 	saveInFlight = false;
 	lastAutoSaveFrame = -1;
+	pendingHotLoadTargetFrame = -1;
+	pendingHotLoadWasSyncedPaused = false;
+	pendingHotLoadWasServerPaused = false;
 	sessionFinalized = false;
 }
 
@@ -384,6 +389,8 @@ bool RequestHotLoadFrame(int targetFrame)
 
 	if (game != nullptr && game->IsProcessingSimFrame()) {
 		pendingHotLoadTargetFrame = targetFrame;
+		pendingHotLoadWasSyncedPaused = (gs != nullptr && gs->paused);
+		pendingHotLoadWasServerPaused = (gameServer != nullptr && gameServer->IsPaused());
 
 		if (gs != nullptr)
 			gs->paused = true;
@@ -405,7 +412,19 @@ bool ProcessQueuedHotLoad()
 
 	const int targetFrame = pendingHotLoadTargetFrame;
 	pendingHotLoadTargetFrame = -1;
-	return LoadFrameNow(targetFrame);
+	const bool loaded = LoadFrameNow(targetFrame);
+
+	if (!loaded) {
+		if (gs != nullptr)
+			gs->paused = pendingHotLoadWasSyncedPaused;
+
+		if (gameServer != nullptr)
+			gameServer->SetPaused(pendingHotLoadWasServerPaused);
+	}
+
+	pendingHotLoadWasSyncedPaused = false;
+	pendingHotLoadWasServerPaused = false;
+	return loaded;
 }
 
 void UpdateRecordFrame(int frame)

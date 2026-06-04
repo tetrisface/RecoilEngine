@@ -4,9 +4,12 @@
 #define _MAP_DAMAGE_H_
 
 #include "System/float3.h"
+#include "System/creg/creg_cond.h"
 
 class IMapDamage
 {
+	CR_DECLARE(IMapDamage)
+
 public:
 	static IMapDamage* InitMapDamage();
 	static void FreeMapDamage(IMapDamage*);

@@ -12,6 +12,11 @@
 static CDummyMapDamage dummyMapDamage;
 static CBasicMapDamage basicMapDamage;
 
+CR_BIND_INTERFACE(IMapDamage)
+CR_REG_METADATA(IMapDamage, (
+	CR_MEMBER(mapHardness)
+))
+
 // never null
 IMapDamage* mapDamage = &dummyMapDamage;
 
@@ -37,4 +42,3 @@ void IMapDamage::FreeMapDamage(IMapDamage* p)
 	assert(p == mapDamage);
 	mapDamage = &dummyMapDamage;
 }
-
