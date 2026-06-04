@@ -122,6 +122,15 @@ public:
 
 	const SyncedFloat3& GetCurrWayPoint() const { return currWayPoint; }
 	const SyncedFloat3& GetNextWayPoint() const { return nextWayPoint; }
+	const float3& GetEarlyCurrWayPoint() const { return earlyCurrWayPoint; }
+	const float3& GetEarlyNextWayPoint() const { return earlyNextWayPoint; }
+	const float3& GetWaypointDir() const { return waypointDir; }
+
+	bool IsAtEndOfPath() const { return atEndOfPath; }
+	bool IsLastWaypoint() const { return lastWaypoint; }
+	bool IsUsingRawMovement() const { return useRawMovement; }
+	bool IsPathingFailed() const { return pathingFailed; }
+	bool IsPathingArrived() const { return pathingArrived; }
 
 	const float3& GetFlatFrontDir() const { return flatFrontDir; }
 	const float3& GetGroundNormal(const float3&) const;
@@ -309,4 +318,3 @@ private:
 };
 
 #endif // GROUNDMOVETYPE_H
-

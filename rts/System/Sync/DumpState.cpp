@@ -528,8 +528,20 @@ void DumpState(int newMinFrameNum, int newMaxFrameNum, int newFramePeriod, std::
 
 		if (const auto* gmt = dynamic_cast<const CGroundMoveType*>(amt)) {
 			file << "\t\t\t\tCGroundMoveType:\n";
+			file << "\t\t\t\t\tpathID: " << gmt->GetPathID() << "\n";
 			file << "\t\t\t\t\tcurrWayPoint: " << TapFloats(gmt->GetCurrWayPoint());
 			file << "\t\t\t\t\tnextWayPoint: " << TapFloats(gmt->GetNextWayPoint());
+			file << "\t\t\t\t\tearlyCurrWayPoint: " << TapFloats(gmt->GetEarlyCurrWayPoint());
+			file << "\t\t\t\t\tearlyNextWayPoint: " << TapFloats(gmt->GetEarlyNextWayPoint());
+			file << "\t\t\t\t\twaypointDir: " << TapFloats(gmt->GetWaypointDir());
+			file << "\t\t\t\t\tcurrWayPointDist: " << TapFloats(gmt->GetCurrWayPointDist());
+			file << "\t\t\t\t\tprevWayPointDist: " << TapFloats(gmt->GetPrevWayPointDist());
+			file << "\t\t\t\t\tatGoal: " << gmt->IsAtGoal() << "\n";
+			file << "\t\t\t\t\tatEndOfPath: " << gmt->IsAtEndOfPath() << "\n";
+			file << "\t\t\t\t\tlastWaypoint: " << gmt->IsLastWaypoint() << "\n";
+			file << "\t\t\t\t\tuseRawMovement: " << gmt->IsUsingRawMovement() << "\n";
+			file << "\t\t\t\t\tpathingFailed: " << gmt->IsPathingFailed() << "\n";
+			file << "\t\t\t\t\tpathingArrived: " << gmt->IsPathingArrived() << "\n";
 		}
 		#endif
 

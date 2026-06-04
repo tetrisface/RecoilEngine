@@ -572,7 +572,7 @@ void CGroundMoveType::PostLoad()
 	// There isn't a path to clear (we've just loaded a saved game), so we must now clear pathID
 	// before requesting our new path; otherwise, a valid path for another unit could be deleted.
 	pathID = 0;
-	pathID = GetNewPath();
+	pathID = pathManager->RequestPath(owner, owner->moveDef, owner->pos, goalPos, goalRadius + extraRadius, true);
 }
 
 bool CGroundMoveType::OwnerMoved(const short oldHeading, const float3& posDif, const float3& cmpEps) {
