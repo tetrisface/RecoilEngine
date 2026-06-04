@@ -68,6 +68,7 @@
 #include "Net/Protocol/NetProtocol.h"
 #include "Sim/Ecs/Registry.h"
 #include "Sim/Ecs/Helper.h"
+#include "Sim/Features/Feature.h"
 #include "Sim/Features/FeatureDef.h"
 #include "Sim/Features/FeatureDefHandler.h"
 #include "Sim/Features/FeatureHandler.h"
@@ -96,6 +97,7 @@
 #include "Sim/Units/CommandAI/BuilderCaches.h"
 #include "Sim/Units/Scripts/UnitScriptFactory.h"
 #include "Sim/Units/Scripts/UnitScriptEngine.h"
+#include "Sim/Units/Unit.h"
 #include "Sim/Units/UnitHandler.h"
 #include "Sim/Units/UnitDefHandler.h"
 #include "Sim/Weapons/WeaponDefHandler.h"
@@ -136,11 +138,13 @@
 #include "System/Sync/DumpState.h"
 #include "System/TimeProfiler.h"
 #include "System/LoadLock.h"
+#include "System/SpringHash.h"
 
 #include "System/Misc/TracyDefs.h"
 
 #include "fmt/ranges.h"
 
+#include <cstdint>
 #include <exception>
 
 #undef CreateDirectory
@@ -152,6 +156,7 @@ CONFIG(bool, ShowFPS).defaultValue(false).description("Displays current framerat
 CONFIG(bool, ShowClock).defaultValue(true).headlessValue(false).description("Displays a clock on the top-right corner of the screen showing the elapsed time of the current game.");
 CONFIG(bool, ShowSpeed).defaultValue(false).description("Displays current game speed.");
 CONFIG(int, ReplayCheckpointDebugDumpFrame).defaultValue(-1).description("Dump replay checkpoint debug state at this frame; -1 disables it.");
+CONFIG(int, ReplayCheckpointDebugSignatureFrame).defaultValue(-1).description("Log compact replay checkpoint state signatures at this frame; -1 disables it.");
 CONFIG(int, ShowPlayerInfo).defaultValue(1).headlessValue(0);
 CONFIG(float, GuiOpacity).defaultValue(0.8f).minimumValue(0.0f).maximumValue(1.0f).description("Sets the opacity of the built-in Spring UI. Generally has no effect on LuaUI widgets. Can be set in-game using shift+, to decrease and shift+. to increase.");
 CONFIG(std::string, InputTextGeo).defaultValue("");
@@ -159,6 +164,103 @@ CONFIG(std::string, InputTextGeo).defaultValue("");
 CONFIG(int, SmoothTimeOffset).defaultValue(0).headlessValue(0).description("Enables frametimeoffset smoothing, 0 = off (old version), -1 = forced 0.5,  1-20 smooth, recommended = 2-3");
 
 CGame* game = nullptr;
+
+static uint32_t ReplayCheckpointHashInt(uint32_t hash, int value)
+{
+	return spring::LiteHash(&value, sizeof(value), hash);
+}
+
+static uint32_t ReplayCheckpointHashUInt(uint32_t hash, uint32_t value)
+{
+	return spring::LiteHash(&value, sizeof(value), hash);
+}
+
+static uint32_t ReplayCheckpointHashFloat(uint32_t hash, float value)
+{
+	return spring::LiteHash(&value, sizeof(value), hash);
+}
+
+static uint32_t ReplayCheckpointHashFloat3(uint32_t hash, const float3& value)
+{
+	hash = ReplayCheckpointHashFloat(hash, value.x);
+	hash = ReplayCheckpointHashFloat(hash, value.y);
+	hash = ReplayCheckpointHashFloat(hash, value.z);
+	return hash;
+}
+
+static uint32_t ReplayCheckpointHashFloat4(uint32_t hash, const float4& value)
+{
+	hash = ReplayCheckpointHashFloat(hash, value.x);
+	hash = ReplayCheckpointHashFloat(hash, value.y);
+	hash = ReplayCheckpointHashFloat(hash, value.z);
+	hash = ReplayCheckpointHashFloat(hash, value.w);
+	return hash;
+}
+
+static void LogReplayCheckpointStateSignature(const char* label)
+{
+	const int debugFrame = configHandler->GetInt("ReplayCheckpointDebugSignatureFrame");
+
+	if (debugFrame < 0 || gs == nullptr || gs->frameNum != debugFrame)
+		return;
+
+	uint32_t unitHash = 0x13572468u;
+	uint32_t featureHash = 0x24681357u;
+	uint32_t projectileHash = 0xabcdef01u;
+
+	const auto& activeUnits = unitHandler.GetActiveUnits();
+	for (const CUnit* unit: activeUnits) {
+		if (unit == nullptr)
+			continue;
+
+		unitHash = ReplayCheckpointHashInt(unitHash, unit->id);
+		unitHash = ReplayCheckpointHashInt(unitHash, unit->team);
+		unitHash = ReplayCheckpointHashFloat3(unitHash, unit->pos);
+		unitHash = ReplayCheckpointHashFloat4(unitHash, unit->speed);
+	}
+
+	for (const int featureID: featureHandler.GetActiveFeatureIDs()) {
+		const CFeature* feature = featureHandler.GetFeature(featureID);
+		uint32_t itemHash = 0x9e3779b9u;
+
+		itemHash = ReplayCheckpointHashInt(itemHash, featureID);
+		if (feature != nullptr) {
+			itemHash = ReplayCheckpointHashInt(itemHash, feature->team);
+			itemHash = ReplayCheckpointHashFloat3(itemHash, feature->pos);
+			itemHash = ReplayCheckpointHashFloat4(itemHash, feature->speed);
+		}
+
+		featureHash ^= itemHash + 0x9e3779b9u + (featureHash << 6) + (featureHash >> 2);
+	}
+
+	const auto& syncedProjectiles = projectileHandler.GetActiveProjectiles(true);
+	for (const CProjectile* projectile: syncedProjectiles) {
+		if (projectile == nullptr)
+			continue;
+
+		projectileHash = ReplayCheckpointHashInt(projectileHash, projectile->id);
+		projectileHash = ReplayCheckpointHashUInt(projectileHash, projectile->GetOwnerID());
+		projectileHash = ReplayCheckpointHashUInt(projectileHash, projectile->GetTeamID());
+		projectileHash = ReplayCheckpointHashFloat3(projectileHash, projectile->pos);
+		projectileHash = ReplayCheckpointHashFloat4(projectileHash, projectile->speed);
+	}
+
+	LOG("[ReplayCheckpoint][sig] %s frame=%d sync=%08x rng=%llu/%llu/%llu/%llu units=%u unitHash=%08x features=%u featureHash=%08x syncedProjectiles=%u projectileHash=%08x",
+		label,
+		gs->frameNum,
+		CSyncChecker::GetChecksum(),
+		static_cast<unsigned long long>(gsRNG.GetInitSeed()),
+		static_cast<unsigned long long>(gsRNG.GetLastSeed()),
+		static_cast<unsigned long long>(gsRNG.GetGenState()),
+		static_cast<unsigned long long>(gsRNG.GetGenSequence()),
+		static_cast<unsigned int>(activeUnits.size()),
+		unitHash,
+		static_cast<unsigned int>(featureHandler.GetActiveFeatureIDs().size()),
+		featureHash,
+		static_cast<unsigned int>(syncedProjectiles.size()),
+		projectileHash
+	);
+}
 
 
 CR_BIND(CGame, (std::string(""), std::string(""), nullptr))
@@ -1840,6 +1942,7 @@ void CGame::SimFrame() {
 		DumpState(-1, -1, 1, std::nullopt);
 
 	ASSERT_SYNCED(gsRNG.GetGenState());
+	LogReplayCheckpointStateSignature("simframe-end");
 	ReplayCheckpointHandler::UpdateRecordFrame(gs->frameNum);
 	processingSimFrame = false;
 	LEAVE_SYNCED_CODE();
@@ -2264,6 +2367,7 @@ bool CGame::LoadReplayCheckpoint(const std::string& checkpointPath, int checkpoi
 			}
 
 			PostLoad();
+			LogReplayCheckpointStateSignature("after-post-load");
 			dumpReplayCheckpointDebugState("after-post-load");
 
 			if (gameServer != nullptr && gameServer->GetDemoReader() != nullptr)

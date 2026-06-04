@@ -49,6 +49,41 @@ LOG_REGISTER_SECTION_GLOBAL(LOG_SECTION_NET)
 
 static spring::unordered_map<int32_t, uint32_t> localSyncChecksums;
 
+static const char* ReplayCheckpointNetMsgName(unsigned int packetCode)
+{
+	switch (packetCode) {
+		case NETMSG_KEYFRAME: return "KEYFRAME";
+		case NETMSG_NEWFRAME: return "NEWFRAME";
+		case NETMSG_COMMAND: return "COMMAND";
+		case NETMSG_SELECT: return "SELECT";
+		case NETMSG_PAUSE: return "PAUSE";
+		case NETMSG_AICOMMAND: return "AICOMMAND";
+		case NETMSG_AICOMMANDS: return "AICOMMANDS";
+		case NETMSG_SYNCRESPONSE: return "SYNCRESPONSE";
+		case NETMSG_CCOMMAND: return "CCOMMAND";
+		case NETMSG_LUAMSG: return "LUAMSG";
+		case NETMSG_GAMEOVER: return "GAMEOVER";
+		default: return "OTHER";
+	}
+}
+
+static void LogReplayCheckpointNetPacket(unsigned int packetCode, const netcode::RawPacket& packet)
+{
+	const int debugFrame = configHandler->GetInt("ReplayCheckpointDebugSignatureFrame");
+	if (debugFrame < 0 || gs == nullptr)
+		return;
+
+	if (gs->frameNum < (debugFrame - GAME_SPEED) || gs->frameNum > (debugFrame + 2))
+		return;
+
+	LOG("[ReplayCheckpoint][net] preframe=%d code=%u name=%s len=%d",
+		gs->frameNum,
+		packetCode,
+		ReplayCheckpointNetMsgName(packetCode),
+		packet.length
+	);
+}
+
 #ifdef SYNCCHECK
 static int32_t ignoreDemoSyncResponsesThroughFrame = -1;
 
@@ -332,6 +367,8 @@ void CGame::ClientReadNet()
 		const uint8_t* inbuf = packet->data;
 		const uint32_t dataLength = packet->length;
 		const uint8_t packetCode = inbuf[0];
+
+		LogReplayCheckpointNetPacket(packetCode, *packet);
 
 		switch (packetCode) {
 			case NETMSG_QUIT: {
