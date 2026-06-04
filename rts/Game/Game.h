@@ -193,6 +193,10 @@ public:
 	float msgProcTimeLeft = 0.0f;  ///< How many SimFrame() calls we still may do.
 	float consumeSpeedMult = 1.0f; ///< How fast we should eat NETMSG_NEWFRAMEs.
 
+#ifdef SYNCCHECK
+	unsigned int syncCheckChecksum = 0;
+#endif
+
 
 	#if 0
 	int skipStartFrame = 0;

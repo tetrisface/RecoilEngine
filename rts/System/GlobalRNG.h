@@ -85,6 +85,12 @@ public:
 	}
 
 	val_type state() const { return val; }
+	val_type sequence() const { return seq; }
+
+	void set_state(const val_type _val, const val_type _seq) {
+		val = _val;
+		seq = _seq;
+	}
 
 public:
 	static constexpr res_type min_res = std::numeric_limits<res_type>::min();
@@ -131,6 +137,14 @@ public:
 	rng_val_type GetInitSeed() const { AssureSyncedness(); return initSeed; }
 	rng_val_type GetLastSeed() const { AssureSyncedness(); return lastSeed; }
 	rng_val_type GetGenState() const { AssureSyncedness(); return (gen.state()); }
+	rng_val_type GetGenSequence() const { AssureSyncedness(); return (gen.sequence()); }
+
+	void SetState(rng_val_type newInitSeed, rng_val_type newLastSeed, rng_val_type newGenState, rng_val_type newGenSequence) {
+		AssureSyncedness();
+		initSeed = newInitSeed;
+		lastSeed = newLastSeed;
+		gen.set_state(newGenState, newGenSequence);
+	}
 
 	// needed for std::{random_}shuffle
 	rng_res_type operator()(              ) { AssureSyncedness(); return (this->*gnext )( ); }
@@ -189,4 +203,3 @@ typedef CGlobalRNG<PCG32, true , true > CGlobalSyncedRNG;
 typedef CGlobalRNG<PCG32, false, false> CGlobalUnsyncedRNG;
 
 #endif
-

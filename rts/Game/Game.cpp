@@ -64,6 +64,7 @@
 #include "Map/MapInfo.h"
 #include "Map/ReadMap.h"
 #include "Net/GameServer.h"
+#include "Net/NetCommands.h"
 #include "Net/Protocol/NetProtocol.h"
 #include "Sim/Ecs/Registry.h"
 #include "Sim/Ecs/Helper.h"
@@ -92,6 +93,7 @@
 #include "Sim/Projectiles/Projectile.h"
 #include "Sim/Projectiles/ProjectileHandler.h"
 #include "Sim/Units/CommandAI/CommandAI.h"
+#include "Sim/Units/CommandAI/BuilderCaches.h"
 #include "Sim/Units/Scripts/UnitScriptFactory.h"
 #include "Sim/Units/Scripts/UnitScriptEngine.h"
 #include "Sim/Units/UnitHandler.h"
@@ -116,6 +118,7 @@
 #include "System/EventHandler.h"
 #include "System/Exceptions.h"
 #include "System/Sync/FPUCheck.h"
+#include "System/Sync/SyncChecker.h"
 #include "System/SafeUtil.h"
 #include "System/SpringExitCode.h"
 #include "System/SpringMath.h"
@@ -148,6 +151,7 @@ CONFIG(bool, GameEndOnConnectionLoss).defaultValue(true);
 CONFIG(bool, ShowFPS).defaultValue(false).description("Displays current framerate.");
 CONFIG(bool, ShowClock).defaultValue(true).headlessValue(false).description("Displays a clock on the top-right corner of the screen showing the elapsed time of the current game.");
 CONFIG(bool, ShowSpeed).defaultValue(false).description("Displays current game speed.");
+CONFIG(int, ReplayCheckpointDebugDumpFrame).defaultValue(-1).description("Dump replay checkpoint debug state at this frame; -1 disables it.");
 CONFIG(int, ShowPlayerInfo).defaultValue(1).headlessValue(0);
 CONFIG(float, GuiOpacity).defaultValue(0.8f).minimumValue(0.0f).maximumValue(1.0f).description("Sets the opacity of the built-in Spring UI. Generally has no effect on LuaUI widgets. Can be set in-game using shift+, to decrease and shift+. to increase.");
 CONFIG(std::string, InputTextGeo).defaultValue("");
@@ -200,6 +204,9 @@ CR_REG_METADATA(CGame, (
 
 	CR_IGNORED(msgProcTimeLeft),
 	CR_IGNORED(consumeSpeedMult),
+#ifdef SYNCCHECK
+	CR_MEMBER(syncCheckChecksum),
+#endif
 
 /*
 	CR_IGNORED(skipStartFrame),
@@ -868,7 +875,7 @@ void CGame::LoadLua(bool dryRun, bool onlyUnsynced)
 			loadscreen->SetLoadMessage("Loading " + prefix + names[i]);
 
 		if (onlyUnsynced && handles[i] != nullptr) {
-			handles[i]->InitUnsynced();
+			handles[i]->ReloadUnsynced();
 		} else {
 			loaders[i](dryRun);
 		}
@@ -1823,8 +1830,11 @@ void CGame::SimFrame() {
 	}
 	#endif
 
-	// useful for desync-debugging (enter instead of -1 start & end frame of the range you want to debug)
-	DumpState(-1, -1, 1, std::nullopt);
+	const int replayCheckpointDebugDumpFrame = configHandler->GetInt("ReplayCheckpointDebugDumpFrame");
+	if (replayCheckpointDebugDumpFrame >= 0)
+		DumpState(replayCheckpointDebugDumpFrame, replayCheckpointDebugDumpFrame, 1, false, std::nullopt, true);
+	else
+		DumpState(-1, -1, 1, std::nullopt);
 
 	ASSERT_SYNCED(gsRNG.GetGenState());
 	ReplayCheckpointHandler::UpdateRecordFrame(gs->frameNum);
@@ -2148,14 +2158,63 @@ bool CGame::LoadReplayCheckpoint(const std::string& checkpointPath, int checkpoi
 	if (checkpointPath.empty())
 		return false;
 
+	struct LocalViewerState {
+		int myPlayerNum = 0;
+		int myTeam = 0;
+		int myAllyTeam = 0;
+		int myPlayingTeam = 0;
+		int myPlayingAllyTeam = 0;
+		bool spectating = false;
+		bool spectatingFullView = false;
+		bool spectatingFullSelect = false;
+		bool fpsMode = false;
+
+		void Capture()
+		{
+			myPlayerNum = gu->myPlayerNum;
+			myTeam = gu->myTeam;
+			myAllyTeam = gu->myAllyTeam;
+			myPlayingTeam = gu->myPlayingTeam;
+			myPlayingAllyTeam = gu->myPlayingAllyTeam;
+			spectating = gu->spectating;
+			spectatingFullView = gu->spectatingFullView;
+			spectatingFullSelect = gu->spectatingFullSelect;
+			fpsMode = gu->fpsMode;
+		}
+
+		void Restore() const
+		{
+			gu->myPlayerNum = myPlayerNum;
+			gu->myTeam = myTeam;
+			gu->myAllyTeam = myAllyTeam;
+			gu->myPlayingTeam = myPlayingTeam;
+			gu->myPlayingAllyTeam = myPlayingAllyTeam;
+			gu->spectating = spectating;
+			gu->spectatingFullView = spectatingFullView;
+			gu->spectatingFullSelect = spectatingFullSelect;
+			gu->fpsMode = fpsMode;
+		}
+	};
+
+	LocalViewerState localViewerState;
+	localViewerState.Capture();
+
 	const bool wasSyncedPaused = (gs != nullptr && gs->paused);
 	const bool wasServerPaused = (gameServer != nullptr && gameServer->IsPaused());
 
-	try {
-		CCregLoadSaveHandler loadSaveHandler;
+		try {
+			CCregLoadSaveHandler loadSaveHandler;
+			const auto dumpReplayCheckpointDebugState = [&](const char* label) {
+				const int debugDumpFrame = configHandler->GetInt("ReplayCheckpointDebugDumpFrame");
+				if (debugDumpFrame < 0 || gs == nullptr || gs->frameNum != debugDumpFrame)
+					return;
 
-		if (!loadSaveHandler.LoadGameStartInfo(checkpointPath)) {
-			LOG_L(L_WARNING,
+				LOG("[ReplayCheckpoint] debug dump %s at frame %d", label, gs->frameNum);
+				DumpState(gs->frameNum, gs->frameNum, 1, false, std::nullopt, true);
+			};
+
+			if (!loadSaveHandler.LoadGameStartInfo(checkpointPath)) {
+				LOG_L(L_WARNING,
 				"[ReplayCheckpoint] checkpoint frame %d is incompatible with this engine build: %s",
 				checkpointFrame,
 				checkpointPath.c_str()
@@ -2163,25 +2222,48 @@ bool CGame::LoadReplayCheckpoint(const std::string& checkpointPath, int checkpoi
 			return false;
 		}
 
-		{
-			auto lock = CLoadLock::GetUniqueLock();
-			loadSaveHandler.LoadGame();
-		}
+			{
+				auto lock = CLoadLock::GetUniqueLock();
+				loadSaveHandler.LoadGame();
+			}
+			dumpReplayCheckpointDebugState("after-creg-load");
 
-		LoadLua(false, true);
-		loadSaveHandler.LoadAIData();
+			CBuilderCaches::InitStatic();
 
-		if (!gameSetup->hostDemo && !uiGroupHandlers.empty()) {
-			const std::vector<uint8_t>& localAIs = skirmishAIHandler.GetSkirmishAIsByPlayer(gu->myPlayerNum);
+			pathManager->ResetLivePathsForLoad();
+			dumpReplayCheckpointDebugState("after-path-reset");
+
+			if (gameSetup != nullptr && gameSetup->hostDemo) {
+				const int restoredPlayerNum = gu->myPlayerNum;
+				localViewerState.Restore();
+
+			if (restoredPlayerNum != gu->myPlayerNum) {
+				LOG("[ReplayCheckpoint] restored local replay viewer player from checkpoint player %d to player %d",
+					restoredPlayerNum,
+					gu->myPlayerNum
+				);
+			}
+			}
+
+			LoadLua(false, true);
+			dumpReplayCheckpointDebugState("after-lua-reload");
+
+			if (gameSetup == nullptr || !gameSetup->hostDemo)
+				loadSaveHandler.LoadAIData();
+			dumpReplayCheckpointDebugState("after-ai-load");
+
+			if (!gameSetup->hostDemo && !uiGroupHandlers.empty()) {
+				const std::vector<uint8_t>& localAIs = skirmishAIHandler.GetSkirmishAIsByPlayer(gu->myPlayerNum);
 
 			for (uint8_t localAI: localAIs)
 				skirmishAIHandler.PostLoadSkirmishAI(localAI);
-		}
+			}
 
-		PostLoad();
+			PostLoad();
+			dumpReplayCheckpointDebugState("after-post-load");
 
-		if (gameServer != nullptr && gameServer->GetDemoReader() != nullptr)
-			gameServer->ResetDemoPlaybackToFrame((gs != nullptr) ? gs->frameNum : checkpointFrame);
+			if (gameServer != nullptr && gameServer->GetDemoReader() != nullptr)
+				gameServer->ResetDemoPlaybackToFrame((gs != nullptr) ? gs->frameNum : checkpointFrame);
 
 		if (clientNet != nullptr) {
 			const unsigned int droppedPackets = clientNet->ClearWaitingServerPackets();
@@ -2202,6 +2284,21 @@ bool CGame::LoadReplayCheckpoint(const std::string& checkpointPath, int checkpoi
 			(gs != nullptr && gs->paused) ? 1 : 0,
 			checkpointPath.c_str()
 		);
+
+		if (gameSetup != nullptr && gameSetup->hostDemo && luaUI != nullptr) {
+			luaUI->QueueAction(CLuaUI::ACTION_RELOAD);
+			LOG("[ReplayCheckpoint] queued LuaUI reload after checkpoint restore");
+		}
+
+#ifdef SYNCCHECK
+		CSyncChecker::SetChecksum(syncCheckChecksum);
+		ResetLocalSyncChecksumsForReplayCheckpoint(checkpointFrame, syncCheckChecksum);
+		LOG("[ReplayCheckpoint] restored sync-check checksum %08x for checkpoint frame %d",
+			syncCheckChecksum,
+			checkpointFrame
+		);
+#endif
+
 		return true;
 	} catch (const content_error& ex) {
 		LOG_L(L_ERROR, "[ReplayCheckpoint] content error while restoring %s: %s", checkpointPath.c_str(), ex.what());

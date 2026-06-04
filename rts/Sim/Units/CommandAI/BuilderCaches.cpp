@@ -16,6 +16,7 @@ void CBuilderCaches::InitStatic()
 	spring::clear_unordered_set(reclaimers);
 	spring::clear_unordered_set(featureReclaimers);
 	spring::clear_unordered_set(resurrecters);
+	removees.clear();
 }
 
 void CBuilderCaches::AddUnitToReclaimers(CUnit* unit) { reclaimers.insert(unit->id); }
@@ -143,6 +144,5 @@ bool CBuilderCaches::IsFeatureBeingResurrected(int featureId, const CUnit* frien
 
 	return retval;
 }
-
 
 

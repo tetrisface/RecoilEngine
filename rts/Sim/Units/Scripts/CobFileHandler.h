@@ -4,6 +4,8 @@
 #define COB_FILE_HANDLER_H
 
 #include <deque>
+#include <string>
+#include <vector>
 
 #include "CobFile.h"
 #include "System/UnorderedMap.hpp"
@@ -21,6 +23,8 @@ public:
 	CCobFile* GetCobFile(const std::string& name);
 	CCobFile* ReloadCobFile(const std::string& name);
 	const CCobFile* GetScriptFile(const std::string& name) const;
+	void SaveMutableCode(std::vector<std::string>& names, std::vector<std::vector<int>>& codes) const;
+	void RestoreMutableCode(const std::vector<std::string>& names, const std::vector<std::vector<int>>& codes);
 
 private:
 	spring::unordered_map<std::string, size_t> cobFileHandles;
@@ -30,4 +34,3 @@ private:
 extern CCobFileHandler* cobFileHandler;
 
 #endif
-

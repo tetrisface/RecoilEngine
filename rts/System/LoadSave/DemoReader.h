@@ -42,6 +42,10 @@ public:
 	float GetModGameTime() const { return chunkHeader.modGameTime; }
 	float GetDemoTimeOffset() const { return demoTimeOffset; }
 	float GetNextDemoReadTime() const { return nextDemoReadTime; }
+	void SetTimeOffset(float offset) {
+		demoTimeOffset = offset;
+		nextDemoReadTime = chunkHeader.modGameTime + demoTimeOffset;
+	}
 
 	const std::string& GetSetupScript() const
 	{

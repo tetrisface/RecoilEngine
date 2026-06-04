@@ -49,6 +49,8 @@ public:
 	 */
 	virtual void DeletePath(unsigned int pathID, bool force = false) {}
 
+	virtual void ResetLivePathsForLoad() {}
+
 	/**
 	 * Returns the next waypoint of the path.
 	 *

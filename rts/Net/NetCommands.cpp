@@ -4,6 +4,7 @@
 
 #include "Game/Game.h"
 #include "GameServer.h"
+#include "NetCommands.h"
 
 #include "ExternalAI/EngineOutHandler.h"
 #include "ExternalAI/SkirmishAIHandler.h"
@@ -47,6 +48,24 @@ CONFIG(bool, LogClientData).defaultValue(false);
 LOG_REGISTER_SECTION_GLOBAL(LOG_SECTION_NET)
 
 static spring::unordered_map<int32_t, uint32_t> localSyncChecksums;
+
+#ifdef SYNCCHECK
+static int32_t ignoreDemoSyncResponsesThroughFrame = -1;
+
+void ResetLocalSyncChecksumsForReplayCheckpoint(int32_t frameNum, uint32_t checksum)
+{
+	const unsigned int clearedChecksums = static_cast<unsigned int>(localSyncChecksums.size());
+	localSyncChecksums.clear();
+	localSyncChecksums[frameNum] = checksum;
+	ignoreDemoSyncResponsesThroughFrame = frameNum;
+
+	LOG("[ReplayCheckpoint] reset %u local sync-check samples at checkpoint frame %d to %08x",
+		clearedChecksums,
+		frameNum,
+		checksum
+	);
+}
+#endif
 
 
 void CGame::AddTraffic(int playerID, int packetCode, int length)
@@ -647,6 +666,9 @@ void CGame::ClientReadNet()
 					uint8_t  playerNum; pckt >> playerNum;
 					int32_t   frameNum; pckt >> frameNum;
 					uint32_t  checkSum; pckt >> checkSum;
+
+					if (frameNum <= ignoreDemoSyncResponsesThroughFrame)
+						break;
 
 					const uint32_t ourCheckSum = localSyncChecksums[frameNum];
 

@@ -55,6 +55,7 @@ namespace QTPFS {
 		void Update() override;
 		void UpdatePath(const CSolidObject* owner, unsigned int pathID) override;
 		void DeletePath(unsigned int pathID, bool force = false) override;
+		void ResetLivePathsForLoad() override;
 		void DeletePathEntity(QTPFS::entity pathEntity);
 
 		unsigned int RequestPath(
@@ -210,4 +211,3 @@ namespace QTPFS {
 }
 
 #endif
-

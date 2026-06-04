@@ -29,6 +29,7 @@
 #include "Sim/Misc/LosHandler.h"
 #include "Sim/Misc/QuadField.h"
 #include "Sim/Misc/CategoryHandler.h"
+#include "Sim/Misc/GlobalSynced.h"
 #include "Sim/MoveTypes/MoveDefHandler.h"
 #include "Sim/Misc/TeamHandler.h"
 #include "Sim/Misc/Wind.h"
@@ -36,6 +37,7 @@
 #include "Sim/Projectiles/ProjectileHandler.h"
 #include "Sim/Units/CommandAI/CommandDescription.h"
 #include "Sim/Units/Scripts/CobEngine.h"
+#include "Sim/Units/Scripts/CobFileHandler.h"
 #include "Sim/Units/Scripts/UnitScriptEngine.h"
 #include "Sim/Units/Scripts/NullUnitScript.h"
 #include "Sim/Weapons/PlasmaRepulser.h"
@@ -49,6 +51,9 @@
 #include "System/creg/Serializer.h"
 #include "System/Exceptions.h"
 #include "System/Log/ILog.h"
+#ifdef SYNCCHECK
+#include "System/Sync/SyncChecker.h"
+#endif
 
 #define MAX_STRING_SIZE (1 << 19) // 512kB excluding null-term
 
@@ -77,6 +82,25 @@ CR_REG_METADATA(CGameStateCollector, (
 
 void CGameStateCollector::Serialize(creg::ISerializer* s)
 {
+	CGlobalSyncedRNG::rng_val_type rngInitSeed = gsRNG.GetInitSeed();
+	CGlobalSyncedRNG::rng_val_type rngLastSeed = gsRNG.GetLastSeed();
+	CGlobalSyncedRNG::rng_val_type rngGenState = gsRNG.GetGenState();
+	CGlobalSyncedRNG::rng_val_type rngGenSequence = gsRNG.GetGenSequence();
+	std::vector<std::string> mutableCobFileNames;
+	std::vector<std::vector<int>> mutableCobFileCodes;
+
+	if (s->IsWriting() && cobFileHandler != nullptr)
+		cobFileHandler->SaveMutableCode(mutableCobFileNames, mutableCobFileCodes);
+
+	s->Serialize(rngInitSeed);
+	s->Serialize(rngLastSeed);
+	s->Serialize(rngGenState);
+	s->Serialize(rngGenSequence);
+	std::unique_ptr<creg::IType> mutableCobFileNamesType = creg::DeduceType<decltype(mutableCobFileNames)>::Get();
+	std::unique_ptr<creg::IType> mutableCobFileCodesType = creg::DeduceType<decltype(mutableCobFileCodes)>::Get();
+	mutableCobFileNamesType->Serialize(s, &mutableCobFileNames);
+	mutableCobFileCodesType->Serialize(s, &mutableCobFileCodes);
+
 	s->SerializeObjectInstance(gs, gs->GetClass());
 	s->SerializeObjectInstance(gu, gu->GetClass());
 	s->SerializeObjectInstance(gameSetup, gameSetup->GetClass());
@@ -113,6 +137,12 @@ void CGameStateCollector::Serialize(creg::ISerializer* s)
 
 	s->SerializeObjectInstance(CUnitDrawer::modelDrawerData->GetSavedData(), CUnitDrawer::modelDrawerData->GetSavedData()->GetClass());
 	s->SerializeObjectInstance(groundDecals, groundDecals->GetClass());
+
+	if (!s->IsWriting() && cobFileHandler != nullptr)
+		cobFileHandler->RestoreMutableCode(mutableCobFileNames, mutableCobFileCodes);
+
+	if (!s->IsWriting())
+		gsRNG.SetState(rngInitSeed, rngLastSeed, rngGenState, rngGenSequence);
 }
 
 
@@ -283,6 +313,10 @@ void CCregLoadSaveHandler::SaveGame(const std::string& path)
 
 			// save creg state
 			const int gameStart = oss.tellp();
+#ifdef SYNCCHECK
+			game->syncCheckChecksum = CSyncChecker::GetChecksum();
+			LOG("[LSH::%s] captured sync-check checksum %08x for frame %d", __func__, game->syncCheckChecksum, gs->frameNum);
+#endif
 			CGameStateCollector gsc;
 			os.SavePackage(&oss, &gsc, gsc.GetClass());
 			PrintSize("Game", ((int)oss.tellp()) - gameStart);

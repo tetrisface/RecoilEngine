@@ -4,6 +4,7 @@
 #include "System/Net/UDPConnection.h"
 
 #include <functional>
+#include <limits>
 
 #if defined DEDICATED || defined DEBUG
 	#include <iostream>
@@ -304,11 +305,59 @@ void CGameServer::ResetDemoPlaybackToFrame(int frameNum)
 
 	demoReader.reset(new CDemoReader(myGameSetup->demoName, 0.1f));
 
-	// Discard demo packets up to the restored frame. The checkpoint already
-	// contains their sim effects; rebroadcasting them would catch the client up.
-	while (netcode::RawPacket* packet = demoReader->GetData(targetModGameTime + 0.001f)) {
+	// Discard demo packets up to the restored frame. Demo chunk timestamps include
+	// setup time, so seek by frame packets and then retime the reader to sim time.
+	int streamFrameNum = -1;
+	int discardedPackets = 0;
+	int discardedFramePackets = 0;
+	float lastFramePacketModGameTime = 0.0f;
+
+	while (!demoReader->ReachedEnd() && streamFrameNum < frameNum) {
+		const float packetModGameTime = demoReader->GetModGameTime();
+		netcode::RawPacket* packet = demoReader->GetData(std::numeric_limits<float>::max());
+
+		if (packet == nullptr)
+			break;
+
+		discardedPackets++;
+
+		if (packet->length > 0) {
+			switch (packet->data[0]) {
+				case NETMSG_KEYFRAME: {
+					if (packet->length >= 5) {
+						streamFrameNum = *(int32_t*)(packet->data + 1);
+					} else {
+						streamFrameNum++;
+					}
+
+					lastFramePacketModGameTime = packetModGameTime;
+					discardedFramePackets++;
+					break;
+				}
+				case NETMSG_NEWFRAME: {
+					streamFrameNum++;
+					lastFramePacketModGameTime = packetModGameTime;
+					discardedFramePackets++;
+					break;
+				}
+				default: {
+					break;
+				}
+			}
+		}
+
 		delete packet;
 	}
+
+	if (streamFrameNum < frameNum) {
+		LOG_L(L_WARNING,
+			"[GameServer] demo playback reset to frame %d stopped early at stream frame %d",
+			frameNum,
+			streamFrameNum
+		);
+	}
+
+	demoReader->SetTimeOffset(targetModGameTime - lastFramePacketModGameTime);
 
 	serverFrameNum = frameNum;
 	gameTime = GetDemoTime();
@@ -323,7 +372,14 @@ void CGameServer::ResetDemoPlaybackToFrame(int frameNum)
 		p.lastFrameResponse = frameNum;
 	}
 
-	LOG("[GameServer] reset demo playback to frame %d, modGameTime %.3f", frameNum, modGameTime);
+	LOG("[GameServer] reset demo playback to frame %d, modGameTime %.3f, discarded %d packets (%d frame packets), streamFrame %d, nextRead %.3f",
+		frameNum,
+		modGameTime,
+		discardedPackets,
+		discardedFramePackets,
+		streamFrameNum,
+		demoReader->GetNextDemoReadTime()
+	);
 }
 
 

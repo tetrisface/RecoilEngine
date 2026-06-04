@@ -274,6 +274,54 @@ QTPFS::PathManager::~PathManager() {
 	registry.clear();
 }
 
+void QTPFS::PathManager::ResetLivePathsForLoad()
+{
+	RECOIL_DETAILED_TRACY_ZONE;
+	assert(!ThreadPool::IsInMultiThreadedSection());
+
+	std::vector<QTPFS::entity> pathEntities;
+	std::vector<QTPFS::entity> searchEntities;
+
+	registry.each([this, &pathEntities, &searchEntities](auto entity) {
+		if (entity == systemEntity)
+			return;
+
+		if (registry.any_of<IPath, UnsyncedIPath, ExternallyManagedSyncedIPath>(entity)) {
+			pathEntities.push_back(entity);
+			return;
+		}
+
+		if (registry.any_of<PathSearch, UnsyncedPathSearch, ExternallyManagedPathSearch>(entity))
+			searchEntities.push_back(entity);
+	});
+
+	for (const auto entity: pathEntities) {
+		if (!registry.valid(entity))
+			continue;
+
+		if (registry.any_of<IPath, UnsyncedIPath, ExternallyManagedSyncedIPath>(entity))
+			DeletePathEntity(entity);
+	}
+
+	for (const auto entity: searchEntities) {
+		if (!registry.valid(entity))
+			continue;
+
+		if (registry.any_of<PathSearch, UnsyncedPathSearch, ExternallyManagedPathSearch>(entity))
+			DestroyPathSearchEntity(entity);
+	}
+
+	std::for_each(pathTraces.begin(), pathTraces.end(), [](std::pair<unsigned int, QTPFS::PathSearchTrace::Execution*>& t){ delete t.second; });
+	pathTraces.clear();
+	sharedPaths.clear();
+	partialSharedPaths.clear();
+
+	LOG("[ReplayCheckpoint] reset QTPFS live paths for load: %u paths, %u searches",
+		static_cast<unsigned int>(pathEntities.size()),
+		static_cast<unsigned int>(searchEntities.size())
+	);
+}
+
 std::int64_t QTPFS::PathManager::Finalize() {
 	RECOIL_DETAILED_TRACY_ZONE;
 	const spring_time t0 = spring_gettime();
