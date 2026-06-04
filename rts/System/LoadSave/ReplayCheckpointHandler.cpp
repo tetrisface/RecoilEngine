@@ -54,6 +54,7 @@ static DemoContext activeContext;
 static std::vector<RecordedCheckpoint> recordedCheckpoints;
 static std::atomic<bool> saveInFlight = {false};
 static int lastAutoSaveFrame = -1;
+static int pendingHotLoadTargetFrame = -1;
 static spring_time lastAutoSaveWallTime = spring_gettime();
 static bool sessionFinalized = false;
 
@@ -327,7 +328,7 @@ bool QueueSaveCurrentFrame(bool overwrite)
 	return true;
 }
 
-bool RequestHotLoadFrame(int targetFrame)
+static bool LoadFrameNow(int targetFrame)
 {
 	if (targetFrame < 0)
 		return false;
@@ -374,6 +375,37 @@ bool RequestHotLoadFrame(int targetFrame)
 		gameServer->SetPaused(true);
 
 	return game != nullptr && game->LoadReplayCheckpoint(checkpoint.path, checkpoint.frame, targetFrame);
+}
+
+bool RequestHotLoadFrame(int targetFrame)
+{
+	if (targetFrame < 0)
+		return false;
+
+	if (game != nullptr && game->IsProcessingSimFrame()) {
+		pendingHotLoadTargetFrame = targetFrame;
+
+		if (gs != nullptr)
+			gs->paused = true;
+
+		if (gameServer != nullptr)
+			gameServer->SetPaused(true);
+
+		LOG("[ReplayCheckpoint] deferred restore to frame %d until current sim frame completes", targetFrame);
+		return true;
+	}
+
+	return LoadFrameNow(targetFrame);
+}
+
+bool ProcessQueuedHotLoad()
+{
+	if (pendingHotLoadTargetFrame < 0)
+		return false;
+
+	const int targetFrame = pendingHotLoadTargetFrame;
+	pendingHotLoadTargetFrame = -1;
+	return LoadFrameNow(targetFrame);
 }
 
 void UpdateRecordFrame(int frame)

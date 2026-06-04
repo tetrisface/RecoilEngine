@@ -31,6 +31,7 @@ namespace ReplayCheckpointHandler
 	CheckpointFile FindNearestCheckpoint(int targetFrame);
 	bool QueueSaveCurrentFrame(bool overwrite);
 	bool RequestHotLoadFrame(int targetFrame);
+	bool ProcessQueuedHotLoad();
 
 	void UpdateRecordFrame(int frame);
 	void NotifySaveCompleted(const std::string& savePath);

@@ -1196,6 +1196,8 @@ bool CGame::Update()
 			GameEnd({}, true);
 	}
 
+	ReplayCheckpointHandler::ProcessQueuedHotLoad();
+
 	LEAVE_SYNCED_CODE();
 
 	{
@@ -1692,6 +1694,7 @@ static const char* const tracingSimFrameName = "SimFrame";
 
 void CGame::SimFrame() {
 	ENTER_SYNCED_CODE();
+	processingSimFrame = true;
 	ASSERT_SYNCED(gsRNG.GetGenState());
 
 	DumpRNG(-1, -1);
@@ -1838,6 +1841,7 @@ void CGame::SimFrame() {
 
 	ASSERT_SYNCED(gsRNG.GetGenState());
 	ReplayCheckpointHandler::UpdateRecordFrame(gs->frameNum);
+	processingSimFrame = false;
 	LEAVE_SYNCED_CODE();
 }
 

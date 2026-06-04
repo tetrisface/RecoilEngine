@@ -78,6 +78,7 @@ public:
 	bool IsSimLagging(float maxLatency = 500.0f) const;
 	bool IsSavedGame() const { return (saveFileHandler != nullptr); }
 	bool IsGameOver() const { return gameOver; }
+	bool IsProcessingSimFrame() const { return processingSimFrame; }
 
 	const spring::unordered_map<int, PlayerTrafficInfo>& GetPlayerTraffic() const {
 		return playerTraffic;
@@ -232,6 +233,7 @@ private:
 
 	std::atomic<bool> loadDone = {false};
 	std::atomic<bool> gameOver = {false};
+	bool processingSimFrame = false;
 };
 
 
