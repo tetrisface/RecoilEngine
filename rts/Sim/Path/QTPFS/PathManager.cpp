@@ -1356,7 +1356,8 @@ unsigned int QTPFS::PathManager::QueueSearch(
 	const float radius,
 	const bool synced,
 	const bool externalRequest,
-	const bool allowRawSearch
+	const bool allowRawSearch,
+	const unsigned int preferredPathID
 ) {
 	RECOIL_DETAILED_TRACY_ZONE;
 	assert(!ThreadPool::IsInMultiThreadedSection());
@@ -1370,7 +1371,15 @@ unsigned int QTPFS::PathManager::QueueSearch(
 	//     calls DeletePath, which ensures any path is removed
 	//     from its cache before we get to ExecuteSearch
 
-	QTPFS::entity pathEntity = registry.create();
+	QTPFS::entity pathEntity = (preferredPathID != 0)
+		? registry.create(QTPFS::entity(preferredPathID))
+		: registry.create();
+	if (preferredPathID != 0 && static_cast<unsigned int>(entt::to_integral(pathEntity)) != preferredPathID) {
+		LOG_L(L_WARNING, "[ReplayCheckpoint] requested QTPFS path id %u but allocated %u",
+			preferredPathID,
+			static_cast<unsigned int>(entt::to_integral(pathEntity))
+		);
+	}
 	assert((!registry.any_of<IPath, UnsyncedIPath, ExternallyManagedSyncedIPath>(pathEntity)));
 
 	auto createNewPath = [](QTPFS::entity entityId, bool synced, bool externalRequest) -> IPath* {
@@ -1699,6 +1708,34 @@ unsigned int QTPFS::PathManager::RequestPath(
 	// 			, targetPoint.x, targetPoint.z
 	// 			, radius
 	// 			);
+	}
+
+	return returnPathId;
+}
+
+unsigned int QTPFS::PathManager::RequestPathWithID(
+	CSolidObject* object,
+	const MoveDef* moveDef,
+	float3 sourcePoint,
+	float3 targetPoint,
+	float radius,
+	bool synced,
+	unsigned int preferredPathID,
+	bool immediateResult
+) {
+	RECOIL_DETAILED_TRACY_ZONE;
+	unsigned int returnPathId = 0;
+
+	if (!IsFinalized())
+		return returnPathId;
+
+	assert(sourcePoint.x != 0.f || sourcePoint.z != 0.f);
+
+	returnPathId = QueueSearch(object, moveDef, sourcePoint, targetPoint, radius, synced, (synced && object != nullptr), false, preferredPathID);
+
+	if (immediateResult && returnPathId != 0) {
+		assert(object == nullptr);
+		returnPathId = ExecuteImmediateSearch(returnPathId);
 	}
 
 	return returnPathId;

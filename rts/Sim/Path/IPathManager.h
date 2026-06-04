@@ -155,6 +155,19 @@ public:
 		return 0;
 	}
 
+	virtual unsigned int RequestPathWithID(
+		CSolidObject* caller,
+		const MoveDef* moveDef,
+		float3 startPos,
+		float3 goalPos,
+		float goalRadius,
+		bool synced,
+		unsigned int preferredPathID,
+		bool immediateResult = false
+	) {
+		return RequestPath(caller, moveDef, startPos, goalPos, goalRadius, synced, immediateResult);
+	}
+
 	/**
 	 * Whenever there are any changes in the terrain
 	 * (examples: explosions, new buildings, etc.)

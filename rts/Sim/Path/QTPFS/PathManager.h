@@ -64,9 +64,20 @@ namespace QTPFS {
 			float3 sourcePos,
 			float3 targetPos,
 			float radius,
-			bool synced,
-			bool immediateResult = false
-		) override;
+		bool synced,
+		bool immediateResult = false
+	) override;
+
+	unsigned int RequestPathWithID(
+		CSolidObject* object,
+		const MoveDef* moveDef,
+		float3 sourcePos,
+		float3 targetPos,
+		float radius,
+		bool synced,
+		unsigned int preferredPathID,
+		bool immediateResult = false
+	) override;
 
 		float3 NextWayPoint(
 			const CSolidObject*, // owner
@@ -143,7 +154,8 @@ namespace QTPFS {
 			const float radius,
 			const bool synced,
 			const bool externalRequest,
-			const bool allowRawSearch
+			const bool allowRawSearch,
+			const unsigned int preferredPathID = 0
 		);
 
 	public:
