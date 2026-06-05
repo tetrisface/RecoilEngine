@@ -26,6 +26,7 @@
 #include "Sim/Weapons/Weapon.h"
 #include "Sim/Weapons/WeaponDef.h"
 #include "System/EventHandler.h"
+#include "System/Config/ConfigHandler.h"
 #include "System/SpringMath.h"
 #include "System/Log/ILog.h"
 #include "System/SafeUtil.h"
@@ -47,6 +48,22 @@
 // unreasonable
 static const int TARGET_LOST_TIMER = 4;
 static const float COMMAND_CANCEL_DIST = 17.0f;
+
+static bool ReplayCheckpointDebugCommandAIFrame()
+{
+	const int debugFrame = configHandler->GetInt("ReplayCheckpointDebugSignatureFrame");
+	return (debugFrame >= 0 && gs != nullptr && gs->frameNum >= (debugFrame - 1) && gs->frameNum <= (debugFrame + 1));
+}
+
+static int ReplayCheckpointDebugCommandParam0(const Command& c)
+{
+	return (c.GetNumParams() >= 1) ? int(c.GetParam(0)) : -1;
+}
+
+static int ReplayCheckpointDebugUnitId(const CUnit* unit)
+{
+	return (unit != nullptr) ? unit->id : -1;
+}
 
 void CCommandAI::InitCommandDescriptionCache() { commandDescriptionCache.Init(); }
 void CCommandAI::KillCommandDescriptionCache() { commandDescriptionCache.Kill(); }
@@ -824,6 +841,24 @@ void CCommandAI::GiveCommand(const Command& c, int playerNum, bool fromSynced, b
 	if (!eventHandler.AllowCommand(owner, c, playerNum, fromSynced, fromLua))
 		return;
 
+	if (ReplayCheckpointDebugCommandAIFrame()) {
+		LOG("[ReplayCheckpoint][CommandAI] give-command frame=%d unit=%d cmd=%d tag=%u opts=%u params=%u param0=%d queue=%u player=%d fromSynced=%d fromLua=%d inCommand=%d targetDied=%d orderTarget=%d",
+			gs->frameNum,
+			ReplayCheckpointDebugUnitId(owner),
+			c.GetID(),
+			c.GetTag(),
+			c.GetOpts(),
+			c.GetNumParams(),
+			ReplayCheckpointDebugCommandParam0(c),
+			unsigned(commandQue.size()),
+			playerNum,
+			fromSynced,
+			fromLua,
+			inCommand,
+			targetDied,
+			ReplayCheckpointDebugUnitId(orderTarget));
+	}
+
 	eventHandler.UnitCommand(owner, c, playerNum, fromSynced, fromLua);
 	GiveCommandReal(c, fromSynced); // send to the sub-classes
 }
@@ -958,6 +993,24 @@ void CCommandAI::ClearTargetLock(const Command &c) {
 void CCommandAI::GiveAllowedCommand(const Command& c, bool fromSynced)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
+	const bool replayCheckpointDebug = ReplayCheckpointDebugCommandAIFrame();
+
+	if (replayCheckpointDebug) {
+		LOG("[ReplayCheckpoint][CommandAI] give-allowed-enter frame=%d unit=%d cmd=%d tag=%u opts=%u params=%u param0=%d queue=%u fromSynced=%d inCommand=%d targetDied=%d orderTarget=%d",
+			gs->frameNum,
+			ReplayCheckpointDebugUnitId(owner),
+			c.GetID(),
+			c.GetTag(),
+			c.GetOpts(),
+			c.GetNumParams(),
+			ReplayCheckpointDebugCommandParam0(c),
+			unsigned(commandQue.size()),
+			fromSynced,
+			inCommand,
+			targetDied,
+			ReplayCheckpointDebugUnitId(orderTarget));
+	}
+
 	if (ExecuteStateCommand(c))
 		return;
 
@@ -996,6 +1049,17 @@ void CCommandAI::GiveAllowedCommand(const Command& c, bool fromSynced)
 	// flush the queue for immediate commands
 	// NOTE: CMD_STOP can be a queued order (!)
 	if (!(c.GetOpts() & SHIFT_KEY)) {
+		if (replayCheckpointDebug) {
+			LOG("[ReplayCheckpoint][CommandAI] give-allowed-flush frame=%d unit=%d cmd=%d queue=%u frontCmd=%d frontTag=%u frontParam0=%d",
+				gs->frameNum,
+				ReplayCheckpointDebugUnitId(owner),
+				c.GetID(),
+				unsigned(commandQue.size()),
+				commandQue.empty() ? CMD_STOP : commandQue.front().GetID(),
+				commandQue.empty() ? 0u : commandQue.front().GetTag(),
+				commandQue.empty() ? -1 : ReplayCheckpointDebugCommandParam0(commandQue.front()));
+		}
+
 		waitCommandsAI.ClearUnitQueue(owner, commandQue);
 		ClearTargetLock((commandQue.empty())? Command(CMD_STOP): commandQue.front());
 		ClearCommandDependencies();
@@ -1042,6 +1106,14 @@ void CCommandAI::GiveAllowedCommand(const Command& c, bool fromSynced)
 	// cancel duplicated commands
 	bool first;
 	if (CancelCommands(c, commandQue, first) > 0) {
+		if (replayCheckpointDebug) {
+			LOG("[ReplayCheckpoint][CommandAI] give-allowed-cancel-duplicate frame=%d unit=%d cmd=%d queue=%u first=%d",
+				gs->frameNum,
+				ReplayCheckpointDebugUnitId(owner),
+				c.GetID(),
+				unsigned(commandQue.size()),
+				first);
+		}
 		if (first) {
 			commandQue.push_front(Command(CMD_STOP));
 			SlowUpdate();
@@ -1062,6 +1134,18 @@ void CCommandAI::GiveAllowedCommand(const Command& c, bool fromSynced)
 	}
 
 	commandQue.push_back(c);
+
+	if (replayCheckpointDebug) {
+		LOG("[ReplayCheckpoint][CommandAI] give-allowed-pushed frame=%d unit=%d cmd=%d tag=%u queue=%u inCommand=%d targetDied=%d orderTarget=%d",
+			gs->frameNum,
+			ReplayCheckpointDebugUnitId(owner),
+			c.GetID(),
+			c.GetTag(),
+			unsigned(commandQue.size()),
+			inCommand,
+			targetDied,
+			ReplayCheckpointDebugUnitId(orderTarget));
+	}
 
 	if (commandQue.size() == 1 && !owner->beingBuilt && !owner->IsStunned()) {
 		SlowUpdate();
@@ -1531,6 +1615,21 @@ void CCommandAI::ExecuteAttack(Command& c)
 void CCommandAI::ExecuteStop(Command& c)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
+	if (ReplayCheckpointDebugCommandAIFrame()) {
+		LOG("[ReplayCheckpoint][CommandAI] execute-stop frame=%d unit=%d cmd=%d tag=%u opts=%u params=%u param0=%d queue=%u inCommand=%d targetDied=%d orderTarget=%d",
+			gs->frameNum,
+			ReplayCheckpointDebugUnitId(owner),
+			c.GetID(),
+			c.GetTag(),
+			c.GetOpts(),
+			c.GetNumParams(),
+			ReplayCheckpointDebugCommandParam0(c),
+			unsigned(commandQue.size()),
+			inCommand,
+			targetDied,
+			ReplayCheckpointDebugUnitId(orderTarget));
+	}
+
 	owner->DropCurrentAttackTarget();
 
 	for (CWeapon* w: owner->weapons) {
@@ -1551,6 +1650,21 @@ void CCommandAI::SlowUpdate()
 	}
 
 	Command& c = commandQue.front();
+
+	if (ReplayCheckpointDebugCommandAIFrame()) {
+		LOG("[ReplayCheckpoint][CommandAI] slow-update frame=%d unit=%d cmd=%d tag=%u opts=%u params=%u param0=%d queue=%u inCommand=%d targetDied=%d orderTarget=%d",
+			gs->frameNum,
+			ReplayCheckpointDebugUnitId(owner),
+			c.GetID(),
+			c.GetTag(),
+			c.GetOpts(),
+			c.GetNumParams(),
+			ReplayCheckpointDebugCommandParam0(c),
+			unsigned(commandQue.size()),
+			inCommand,
+			targetDied,
+			ReplayCheckpointDebugUnitId(orderTarget));
+	}
 
 	switch (c.GetID()) {
 		case CMD_WAIT: {
@@ -1631,6 +1745,18 @@ void CCommandAI::DeleteDeathDependence(CObject* o, DependenceType dep) {
 void CCommandAI::DependentDied(CObject* o)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
+	if (ReplayCheckpointDebugCommandAIFrame()) {
+		LOG("[ReplayCheckpoint][CommandAI] dependent-died frame=%d unit=%d queue=%u inCommand=%d targetDied=%d orderTarget=%d isOrderTarget=%d hasDependency=%d",
+			gs->frameNum,
+			ReplayCheckpointDebugUnitId(owner),
+			unsigned(commandQue.size()),
+			inCommand,
+			targetDied,
+			ReplayCheckpointDebugUnitId(orderTarget),
+			o == orderTarget,
+			commandDeathDependences.find(o) != commandDeathDependences.end());
+	}
+
 	if (o == orderTarget) {
 		targetDied = true;
 		orderTarget = nullptr;
@@ -1663,6 +1789,24 @@ void CCommandAI::FinishCommand()
 	assert(!commandQue.empty());
 
 	const Command cmd = commandQue.front(); // copy is needed here
+	const bool replayCheckpointDebug = ReplayCheckpointDebugCommandAIFrame();
+
+	if (replayCheckpointDebug) {
+		LOG("[ReplayCheckpoint][CommandAI] finish-enter frame=%d unit=%d cmd=%d tag=%u opts=%u params=%u param0=%d queue=%u repeat=%d inCommand=%d targetDied=%d orderTarget=%d lastFinish=%d",
+			gs->frameNum,
+			ReplayCheckpointDebugUnitId(owner),
+			cmd.GetID(),
+			cmd.GetTag(),
+			cmd.GetOpts(),
+			cmd.GetNumParams(),
+			ReplayCheckpointDebugCommandParam0(cmd),
+			unsigned(commandQue.size()),
+			repeatOrders,
+			inCommand,
+			targetDied,
+			ReplayCheckpointDebugUnitId(orderTarget),
+			lastFinishCommand);
+	}
 
 	const bool dontRepeat = (cmd.IsInternalOrder());
 	const bool pushCommand = (cmd.GetID() != CMD_STOP && cmd.GetID() != CMD_PATROL);
@@ -1676,25 +1820,77 @@ void CCommandAI::FinishCommand()
 	targetDied = false;
 
 	SetOrderTarget(nullptr);
+
+	if (replayCheckpointDebug) {
+		LOG("[ReplayCheckpoint][CommandAI] finish-after-pop frame=%d unit=%d finishedCmd=%d finishedTag=%u queue=%u frontCmd=%d frontTag=%u frontParam0=%d",
+			gs->frameNum,
+			ReplayCheckpointDebugUnitId(owner),
+			cmd.GetID(),
+			cmd.GetTag(),
+			unsigned(commandQue.size()),
+			commandQue.empty() ? CMD_STOP : commandQue.front().GetID(),
+			commandQue.empty() ? 0u : commandQue.front().GetTag(),
+			commandQue.empty() ? -1 : ReplayCheckpointDebugCommandParam0(commandQue.front()));
+	}
+
 	eoh->CommandFinished(*owner, cmd);
 	eventHandler.UnitCmdDone(owner, cmd);
 	ClearTargetLock(cmd);
+
+	if (replayCheckpointDebug) {
+		LOG("[ReplayCheckpoint][CommandAI] finish-after-cmddone frame=%d unit=%d finishedCmd=%d finishedTag=%u queue=%u frontCmd=%d frontTag=%u frontParam0=%d",
+			gs->frameNum,
+			ReplayCheckpointDebugUnitId(owner),
+			cmd.GetID(),
+			cmd.GetTag(),
+			unsigned(commandQue.size()),
+			commandQue.empty() ? CMD_STOP : commandQue.front().GetID(),
+			commandQue.empty() ? 0u : commandQue.front().GetTag(),
+			commandQue.empty() ? -1 : ReplayCheckpointDebugCommandParam0(commandQue.front()));
+	}
 
 	if (commandQue.empty()) {
 		if (owner->GetGroup() == nullptr)
 			eoh->UnitIdle(*owner);
 
 		eventHandler.UnitIdle(owner);
+
+		if (replayCheckpointDebug) {
+			LOG("[ReplayCheckpoint][CommandAI] finish-after-idle frame=%d unit=%d finishedCmd=%d finishedTag=%u queue=%u frontCmd=%d frontTag=%u frontParam0=%d",
+				gs->frameNum,
+				ReplayCheckpointDebugUnitId(owner),
+				cmd.GetID(),
+				cmd.GetTag(),
+				unsigned(commandQue.size()),
+				commandQue.empty() ? CMD_STOP : commandQue.front().GetID(),
+				commandQue.empty() ? 0u : commandQue.front().GetTag(),
+				commandQue.empty() ? -1 : ReplayCheckpointDebugCommandParam0(commandQue.front()));
+		}
 	}
 
 	// avoid infinite loops
-	if (lastFinishCommand == gs->frameNum)
+	if (lastFinishCommand == gs->frameNum) {
+		if (replayCheckpointDebug) {
+			LOG("[ReplayCheckpoint][CommandAI] finish-skip-recursive frame=%d unit=%d queue=%u lastFinish=%d",
+				gs->frameNum,
+				ReplayCheckpointDebugUnitId(owner),
+				unsigned(commandQue.size()),
+				lastFinishCommand);
+		}
 		return;
+	}
 
 	lastFinishCommand = gs->frameNum;
 
-	if (owner->IsStunned())
+	if (owner->IsStunned()) {
+		if (replayCheckpointDebug) {
+			LOG("[ReplayCheckpoint][CommandAI] finish-skip-stunned frame=%d unit=%d queue=%u",
+				gs->frameNum,
+				ReplayCheckpointDebugUnitId(owner),
+				unsigned(commandQue.size()));
+		}
 		return;
+	}
 
 	SlowUpdate();
 }
@@ -1861,4 +2057,3 @@ void CCommandAI::StopAttackingAllyTeam(int ally)
 	RECOIL_DETAILED_TRACY_ZONE;
 	StopAttackingTargetIf([&](const CUnit* t) { return (t != nullptr && t->allyteam == ally); });
 }
-

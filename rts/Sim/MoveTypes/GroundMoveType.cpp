@@ -32,6 +32,7 @@
 #include "Sim/Weapons/WeaponDefHandler.h"
 #include "Sim/Weapons/Weapon.h"
 #include "System/creg/STL_Tuple.h"
+#include "System/Config/ConfigHandler.h"
 #include "System/EventHandler.h"
 #include "System/Log/ILog.h"
 #include "System/FastMath.h"
@@ -211,6 +212,19 @@ static CGroundMoveType::MemberData gmtMemberData = {
 		std::pair<unsigned int, float*>{MEMBER_LITERAL_HASH("sqSkidSpeedMult"), nullptr},
 	}},
 };
+
+static bool ReplayCheckpointDebugGroundMoveUnit(const CUnit* unit)
+{
+	const int debugFrame = configHandler->GetInt("ReplayCheckpointDebugSignatureFrame");
+	return (
+		debugFrame >= 0 &&
+		gs != nullptr &&
+		unit != nullptr &&
+		unit->id == 11630 &&
+		gs->frameNum >= (debugFrame - 1) &&
+		gs->frameNum <= (debugFrame + 1)
+	);
+}
 
 
 
@@ -1076,9 +1090,34 @@ void CGroundMoveType::UpdateTraversalPlan() {
 	earlyCurrWayPoint = currWayPoint;
 	earlyNextWayPoint = nextWayPoint;
 
+	if (ReplayCheckpointDebugGroundMoveUnit(owner)) {
+		LOG("[ReplayCheckpoint][GMT] traversal-start frame=%d unit=%d pathID=%u nextPathId=%u atGoal=%d atEnd=%d curr=(%f,%f,%f) next=(%f,%f,%f) goal=(%f,%f,%f) pos=(%f,%f,%f)",
+			gs->frameNum,
+			owner->id,
+			pathID,
+			nextPathId,
+			int(atGoal),
+			int(atEndOfPath),
+			float(currWayPoint.x), float(currWayPoint.y), float(currWayPoint.z),
+			float(nextWayPoint.x), float(nextWayPoint.y), float(nextWayPoint.z),
+			goalPos.x, goalPos.y, goalPos.z,
+			owner->pos.x, owner->pos.y, owner->pos.z
+		);
+	}
+
 	// Check whether the new path is ready.
 	if (nextPathId != 0) {
 		float3 tempWaypoint = pathManager->NextWayPoint(owner, nextPathId, 0,   owner->pos, std::max(WAYPOINT_RADIUS, currentSpeed * 1.05f), true);
+		if (ReplayCheckpointDebugGroundMoveUnit(owner)) {
+			LOG("[ReplayCheckpoint][GMT] next-path-probe frame=%d unit=%d pathID=%u nextPathId=%u temp=(%f,%f,%f) useRaw=%d",
+				gs->frameNum,
+				owner->id,
+				pathID,
+				nextPathId,
+				tempWaypoint.x, tempWaypoint.y, tempWaypoint.z,
+				int(useRawMovement)
+			);
+		}
 
 		// a non-temp answer tells us that the new path is ready to be used.
 		if (tempWaypoint.y != (-1.f)) {
@@ -1097,6 +1136,16 @@ void CGroundMoveType::UpdateTraversalPlan() {
 			deletePathId = pathID;
 			pathID = nextPathId;
 			nextPathId = 0;
+			if (ReplayCheckpointDebugGroundMoveUnit(owner)) {
+				LOG("[ReplayCheckpoint][GMT] next-path-switched frame=%d unit=%d pathID=%u deletePathId=%u curr=(%f,%f,%f) next=(%f,%f,%f)",
+					gs->frameNum,
+					owner->id,
+					pathID,
+					deletePathId,
+					earlyCurrWayPoint.x, earlyCurrWayPoint.y, earlyCurrWayPoint.z,
+					earlyNextWayPoint.x, earlyNextWayPoint.y, earlyNextWayPoint.z
+				);
+			}
 		}
 	}
 

@@ -246,7 +246,7 @@ static void LogReplayCheckpointStateSignature(const char* label)
 		projectileHash = ReplayCheckpointHashFloat4(projectileHash, projectile->speed);
 	}
 
-	LOG("[ReplayCheckpoint][sig] %s frame=%d sync=%08x rng=%llu/%llu/%llu/%llu units=%u unitHash=%08x features=%u featureHash=%08x syncedProjectiles=%u projectileHash=%08x",
+	LOG("[ReplayCheckpoint][sig] %s frame=%d sync=%08x rng=%llu/%llu/%llu/%llu units=%u unitHash=%08x unitCursor=%u/%u features=%u featureHash=%08x syncedProjectiles=%u projectileHash=%08x",
 		label,
 		gs->frameNum,
 		CSyncChecker::GetChecksum(),
@@ -256,6 +256,8 @@ static void LogReplayCheckpointStateSignature(const char* label)
 		static_cast<unsigned long long>(gsRNG.GetGenSequence()),
 		static_cast<unsigned int>(activeUnits.size()),
 		unitHash,
+		static_cast<unsigned int>(unitHandler.GetActiveSlowUpdateUnit()),
+		static_cast<unsigned int>(unitHandler.GetActiveUpdateUnit()),
 		static_cast<unsigned int>(featureHandler.GetActiveFeatureIDs().size()),
 		featureHash,
 		static_cast<unsigned int>(syncedProjectiles.size()),
@@ -277,6 +279,14 @@ static void RebuildReplayCheckpointGroundMovePaths()
 			continue;
 
 		const unsigned int oldPathID = groundMoveType->GetPathID();
+		if (oldPathID != 0 && rebuiltUnits < 8) {
+			LOG("[ReplayCheckpoint] rebuilding QTPFS path for unit %d (%s): oldPathID=%u",
+				unit->id,
+				unit->unitDef->name.c_str(),
+				oldPathID
+			);
+		}
+
 		groundMoveType->RebuildPathAfterLoad();
 
 		if (oldPathID != 0) {
@@ -1836,6 +1846,7 @@ void CGame::SimFrame() {
 
 	// note: starts at -1, first actual frame is 0
 	gs->frameNum += 1;
+	LogReplayCheckpointStateSignature("simframe-begin");
 #ifdef SYNC_HISTORY
 	CSyncChecker::NewGameFrame();
 #endif
@@ -1896,6 +1907,7 @@ void CGame::SimFrame() {
 		// so we need to save the previous unit state before it happened
 		unitHandler.UpdatePreFrame();
 		featureHandler.UpdatePreFrame();
+		LogReplayCheckpointStateSignature("after-preframe");
 
 		{
 			SCOPED_TIMER("Sim::GameFrame");
@@ -1907,15 +1919,24 @@ void CGame::SimFrame() {
 
 			eventHandler.GameFrame(gs->frameNum);
 		}
+		LogReplayCheckpointStateSignature("after-gameframe");
 
 		helper->Update();
+		LogReplayCheckpointStateSignature("after-helper-update");
 		readMap->Update();
+		LogReplayCheckpointStateSignature("after-readmap-update");
 		smoothGround.UpdateSmoothMesh();
+		LogReplayCheckpointStateSignature("after-smoothground-update");
 		mapDamage->Update();
+		LogReplayCheckpointStateSignature("after-mapdamage-update");
 		unitHandler.Update();
+		LogReplayCheckpointStateSignature("after-unit-update");
 		pathManager->Update();
+		LogReplayCheckpointStateSignature("after-path-update");
 		projectileHandler.Update();
+		LogReplayCheckpointStateSignature("after-projectile-update");
 		featureHandler.Update();
+		LogReplayCheckpointStateSignature("after-feature-update");
 		{
 			/* The default GAME_SPEED is 30, which doesn't divide 1000 well,
 			 * so scripts will perceive 990ms per second. But this is fine,
@@ -1930,6 +1951,7 @@ void CGame::SimFrame() {
 
 			unitHandler.UpdatePostAnimation();
 		}
+		LogReplayCheckpointStateSignature("after-script-update");
 		envResHandler.Update();
 		losHandler->Update();
 		// dead ghosts have to be updated in sim, after los,

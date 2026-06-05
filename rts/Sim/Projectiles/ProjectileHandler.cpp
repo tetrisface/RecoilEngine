@@ -1,6 +1,7 @@
 /* This file is part of the Spring engine (GPL v2 or later), see LICENSE.html */
 
 #include <algorithm>
+#include <cstring>
 
 #include "Projectile.h"
 #include "ProjectileHandler.h"
@@ -28,6 +29,7 @@
 #include "System/EventHandler.h"
 #include "System/Log/ILog.h"
 #include "System/Cpp11Compat.hpp"
+#include "System/SpringHash.h"
 #include "System/SpringMath.h"
 #include "System/TimeProfiler.h"
 #include "System/Threading/ThreadPool.h"
@@ -156,6 +158,129 @@ static void MAPPOS_SANITY_CHECK(const float3 v)
 	assert(v.y <=  MAX_PROJECTILE_HEIGHT);
 }
 
+static bool ReplayCheckpointDebugProjectileFrame()
+{
+	const int debugFrame = configHandler->GetInt("ReplayCheckpointDebugSignatureFrame");
+	return (debugFrame >= 0 && gs->frameNum == debugFrame);
+}
+
+static uint32_t ReplayCheckpointProjectileHashInt(uint32_t hash, int value)
+{
+	return spring::LiteHash(&value, sizeof(value), hash);
+}
+
+static uint32_t ReplayCheckpointProjectileHashUInt(uint32_t hash, uint32_t value)
+{
+	return spring::LiteHash(&value, sizeof(value), hash);
+}
+
+static uint32_t ReplayCheckpointProjectileHashFloat(uint32_t hash, float value)
+{
+	uint32_t bits;
+	std::memcpy(&bits, &value, sizeof(bits));
+	return ReplayCheckpointProjectileHashUInt(hash, bits);
+}
+
+static uint32_t ReplayCheckpointProjectileHashFloat3(uint32_t hash, const float3& value)
+{
+	hash = ReplayCheckpointProjectileHashFloat(hash, value.x);
+	hash = ReplayCheckpointProjectileHashFloat(hash, value.y);
+	hash = ReplayCheckpointProjectileHashFloat(hash, value.z);
+	return hash;
+}
+
+static uint32_t ReplayCheckpointProjectileHashFloat4(uint32_t hash, const float4& value)
+{
+	hash = ReplayCheckpointProjectileHashFloat(hash, value.x);
+	hash = ReplayCheckpointProjectileHashFloat(hash, value.y);
+	hash = ReplayCheckpointProjectileHashFloat(hash, value.z);
+	hash = ReplayCheckpointProjectileHashFloat(hash, value.w);
+	return hash;
+}
+
+static void ReplayCheckpointLogProjectileEvent(const char* label, const CProjectile* p)
+{
+	if (!ReplayCheckpointDebugProjectileFrame() || p == nullptr || !p->synced)
+		return;
+
+	const auto* wp = dynamic_cast<const CWeaponProjectile*>(p);
+	const char* className = "unknown";
+
+#ifdef USING_CREG
+	if (p->GetClass() != nullptr)
+		className = p->GetClass()->name;
+#endif
+
+	LOG("[ReplayCheckpoint][proj] %s frame=%d id=%d class=%s weapon=%d piece=%d type=%u create=%d delete=%d checkCol=%d pos=(%f,%f,%f) speed=(%f,%f,%f,%f) pre=(%f,%f,%f) owner=%d team=%d allyteam=%d ttl=%d targetPos=(%f,%f,%f) startPos=(%f,%f,%f) bounced=%d",
+		label,
+		gs->frameNum,
+		p->id,
+		className,
+		p->weapon,
+		p->piece,
+		p->GetProjectileType(),
+		p->createMe,
+		p->deleteMe,
+		p->checkCol,
+		p->pos.x, p->pos.y, p->pos.z,
+		p->speed.x, p->speed.y, p->speed.z, p->speed.w,
+		p->preFrameTra.t.x, p->preFrameTra.t.y, p->preFrameTra.t.z,
+		p->GetOwnerID(),
+		p->GetTeamID(),
+		p->GetAllyteamID(),
+		(wp != nullptr) ? wp->GetTimeToLive() : -1,
+		(wp != nullptr) ? wp->GetTargetPos().x : 0.0f,
+		(wp != nullptr) ? wp->GetTargetPos().y : 0.0f,
+		(wp != nullptr) ? wp->GetTargetPos().z : 0.0f,
+		(wp != nullptr) ? wp->GetStartPos().x : 0.0f,
+		(wp != nullptr) ? wp->GetStartPos().y : 0.0f,
+		(wp != nullptr) ? wp->GetStartPos().z : 0.0f,
+		(wp != nullptr) ? wp->HasScheduledBounce() : false);
+}
+
+static void ReplayCheckpointLogProjectileSignature(const char* label)
+{
+	if (!ReplayCheckpointDebugProjectileFrame())
+		return;
+
+	uint32_t hash = 0x92c6a35du;
+	uint32_t count = 0;
+
+	for (const CProjectile* p : projectileHandler.GetActiveProjectiles(true)) {
+		const auto* wp = dynamic_cast<const CWeaponProjectile*>(p);
+
+		hash = ReplayCheckpointProjectileHashInt(hash, p->id);
+		hash = ReplayCheckpointProjectileHashInt(hash, p->weapon);
+		hash = ReplayCheckpointProjectileHashInt(hash, p->piece);
+		hash = ReplayCheckpointProjectileHashInt(hash, p->createMe);
+		hash = ReplayCheckpointProjectileHashInt(hash, p->deleteMe);
+		hash = ReplayCheckpointProjectileHashInt(hash, p->checkCol);
+		hash = ReplayCheckpointProjectileHashUInt(hash, p->GetProjectileType());
+		hash = ReplayCheckpointProjectileHashUInt(hash, p->GetCollisionFlags());
+		hash = ReplayCheckpointProjectileHashFloat3(hash, p->pos);
+		hash = ReplayCheckpointProjectileHashFloat4(hash, p->speed);
+		hash = ReplayCheckpointProjectileHashFloat3(hash, p->preFrameTra.t);
+		hash = ReplayCheckpointProjectileHashInt(hash, p->GetOwnerID());
+		hash = ReplayCheckpointProjectileHashInt(hash, p->GetTeamID());
+		hash = ReplayCheckpointProjectileHashInt(hash, p->GetAllyteamID());
+
+		if (wp != nullptr) {
+			hash = ReplayCheckpointProjectileHashInt(hash, wp->GetTimeToLive());
+			hash = ReplayCheckpointProjectileHashFloat3(hash, wp->GetTargetPos());
+			hash = ReplayCheckpointProjectileHashFloat3(hash, wp->GetStartPos());
+			hash = ReplayCheckpointProjectileHashInt(hash, wp->HasScheduledBounce());
+		}
+
+		++count;
+	}
+
+	LOG("[ReplayCheckpoint][proj-sig] %s frame=%d syncedProjectiles=%u hash=%08x",
+		label,
+		gs->frameNum,
+		count,
+		hash);
+}
+
 template<bool synced>
 void CProjectileHandler::UpdateProjectilesImpl()
 {
@@ -176,11 +301,14 @@ void CProjectileHandler::UpdateProjectilesImpl()
 #endif
 
 		// (delayed) creation for projectiles added after CheckCollisions()
-		if (p->createMe)
+		if (p->createMe) {
+			ReplayCheckpointLogProjectileEvent("create-before-update", p);
 			CreateProjectile(p);
+		}
 
 		// deletion (FIXME: move outside of loop)
 		if (p->deleteMe) {
+			ReplayCheckpointLogProjectileEvent("destroy-before-update", p);
 			DestroyProjectile(p);
 			continue;
 		}
@@ -200,6 +328,8 @@ void CProjectileHandler::UpdateProjectilesImpl()
 			MAPPOS_SANITY_CHECK(p->pos);
 			p->PreUpdate();
 			p->Update();
+			if (p->deleteMe)
+				ReplayCheckpointLogProjectileEvent("marked-delete-after-update", p);
 			quadField.MovedProjectile(p);
 
 			MAPPOS_SANITY_CHECK(p->pos);
@@ -295,6 +425,8 @@ void CProjectileHandler::DestroyProjectile(CProjectile* p)
 	RECOIL_DETAILED_TRACY_ZONE;
 	assert(!p->createMe);
 
+	ReplayCheckpointLogProjectileEvent("destroy", p);
+
 	eventHandler.RenderProjectileDestroyed(p);
 
 	if (p->synced) {
@@ -323,10 +455,13 @@ void CProjectileHandler::Update()
 {
 	{
 		SCOPED_TIMER("Sim::Projectiles");
+		ReplayCheckpointLogProjectileSignature("begin");
 
 		// check if any projectiles have collided since the previous update
 		CheckCollisions();
+		ReplayCheckpointLogProjectileSignature("after-collisions");
 		UpdateProjectiles();
+		ReplayCheckpointLogProjectileSignature("after-update-projectiles");
 
 		UPDATE_PTR_CONTAINER(groundFlashes);
 
@@ -455,9 +590,11 @@ void CProjectileHandler::CheckUnitCollisions(
 
 			if (!cq.InsideHit()) {
 				p->SetPosition(cq.GetHitPos());
+				ReplayCheckpointLogProjectileEvent("collision-unit", p);
 				p->Collision(unit);
 				p->SetPosition(ppos0);
 			} else {
+				ReplayCheckpointLogProjectileEvent("collision-unit-inside", p);
 				p->Collision(unit);
 			}
 
@@ -494,9 +631,11 @@ void CProjectileHandler::CheckFeatureCollisions(
 
 			if (!cq.InsideHit()) {
 				p->SetPosition(cq.GetHitPos());
+				ReplayCheckpointLogProjectileEvent("collision-feature", p);
 				p->Collision(feature);
 				p->SetPosition(ppos0);
 			} else {
+				ReplayCheckpointLogProjectileEvent("collision-feature-inside", p);
 				p->Collision(feature);
 			}
 
@@ -635,6 +774,7 @@ void CProjectileHandler::CheckGroundCollisions(bool synced)
 			}
 		}
 
+		ReplayCheckpointLogProjectileEvent("collision-ground", p);
 		p->Collision();
 	}
 }
@@ -784,4 +924,3 @@ int CProjectileHandler::GetCurrentParticles() const
 	partCount += groundFlashes.size();
 	return partCount;
 }
-

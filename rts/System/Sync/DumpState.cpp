@@ -529,6 +529,7 @@ void DumpState(int newMinFrameNum, int newMaxFrameNum, int newFramePeriod, std::
 		if (const auto* gmt = dynamic_cast<const CGroundMoveType*>(amt)) {
 			file << "\t\t\t\tCGroundMoveType:\n";
 			file << "\t\t\t\t\tpathID: " << gmt->GetPathID() << "\n";
+			file << "\t\t\t\t\tnextPathID: " << gmt->GetNextPathID() << "\n";
 			file << "\t\t\t\t\tcurrWayPoint: " << TapFloats(gmt->GetCurrWayPoint());
 			file << "\t\t\t\t\tnextWayPoint: " << TapFloats(gmt->GetNextWayPoint());
 			file << "\t\t\t\t\tearlyCurrWayPoint: " << TapFloats(gmt->GetEarlyCurrWayPoint());

@@ -120,6 +120,7 @@ public:
 	float GetGoalRadius(float s = 0.0f) const override { return (goalRadius + extraRadius * s); }
 
 	unsigned int GetPathID() const { return pathID; }
+	unsigned int GetNextPathID() const { return nextPathId; }
 
 	const SyncedFloat3& GetCurrWayPoint() const { return currWayPoint; }
 	const SyncedFloat3& GetNextWayPoint() const { return nextWayPoint; }

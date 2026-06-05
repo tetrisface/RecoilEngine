@@ -24,6 +24,7 @@
 #include "Sim/Weapons/WeaponDef.h"
 #include "Rendering/Models/3DModel.hpp"
 #include "System/Log/ILog.h"
+#include "System/Config/ConfigHandler.h"
 #include "System/EventHandler.h"
 #include "System/SpringMath.h"
 #include "System/StringUtil.h"
@@ -53,6 +54,12 @@ static float CalcTargetRadius(const CUnit* targetUnit, float minRadius, float ra
 	}
 
 	return (minRadius * radiusMult);
+}
+
+static bool ReplayCheckpointDebugMobileCAIFrame()
+{
+	const int debugFrame = configHandler->GetInt("ReplayCheckpointDebugSignatureFrame");
+	return (debugFrame >= 0 && gs != nullptr && gs->frameNum >= (debugFrame - 1) && gs->frameNum <= (debugFrame + 1));
 }
 
 
@@ -888,6 +895,22 @@ void CMobileCAI::ExecuteAttack(Command& c)
 	RECOIL_DETAILED_TRACY_ZONE;
 	assert(owner->unitDef->canAttack);
 
+	const bool replayCheckpointDebug = ReplayCheckpointDebugMobileCAIFrame();
+	if (replayCheckpointDebug) {
+		LOG("[ReplayCheckpoint][MobileCAI] attack-enter frame=%d unit=%d cmd=%d tag=%d opts=%u params=%u param0=%d inCommand=%d orderTarget=%d targetDied=%d",
+			gs->frameNum,
+			owner->id,
+			c.GetID(),
+			c.GetTag(),
+			c.GetOpts(),
+			c.GetNumParams(),
+			(c.GetNumParams() >= 1) ? int(c.GetParam(0)) : -1,
+			inCommand,
+			(orderTarget != nullptr) ? orderTarget->id : -1,
+			targetDied ? 1 : 0
+		);
+	}
+
 	// limit how far away we fly based on our movestate
 	if (tempOrder && orderTarget != nullptr) {
 		const float3& closestPos = ClosestPointOnLine(commandPos1, commandPos2, owner->pos);
@@ -896,6 +919,15 @@ void CMobileCAI::ExecuteAttack(Command& c)
 		const float maxTargetDist = (owner->moveType->GetManeuverLeash() * owner->moveState + owner->maxRange);
 
 		if (owner->moveState < MOVESTATE_ROAM && curTargetDist > maxTargetDist) {
+			if (replayCheckpointDebug) {
+				LOG("[ReplayCheckpoint][MobileCAI] attack-cancel frame=%d unit=%d reason=temp-leash target=%d curDist=%f maxDist=%f",
+					gs->frameNum,
+					owner->id,
+					orderTarget->id,
+					curTargetDist,
+					maxTargetDist
+				);
+			}
 			StopMoveAndFinishCommand();
 			return;
 		}
@@ -911,14 +943,35 @@ void CMobileCAI::ExecuteAttack(Command& c)
 
 				// check if we have valid target parameter and that we aren't attacking ourselves
 				if (targetUnit == nullptr) {
+					if (replayCheckpointDebug) {
+						LOG("[ReplayCheckpoint][MobileCAI] attack-cancel frame=%d unit=%d reason=missing-target target=%d",
+							gs->frameNum,
+							owner->id,
+							int(c.GetParam(0))
+						);
+					}
 					StopMoveAndFinishCommand();
 					return;
 				}
 				if (targetUnit == owner) {
+					if (replayCheckpointDebug) {
+						LOG("[ReplayCheckpoint][MobileCAI] attack-cancel frame=%d unit=%d reason=self-target",
+							gs->frameNum,
+							owner->id
+						);
+					}
 					StopMoveAndFinishCommand();
 					return;
 				}
 				if (targetUnit->GetTransporter() != nullptr && !modInfo.targetableTransportedUnits) {
+					if (replayCheckpointDebug) {
+						LOG("[ReplayCheckpoint][MobileCAI] attack-cancel frame=%d unit=%d reason=transported-target target=%d transporter=%d",
+							gs->frameNum,
+							owner->id,
+							targetUnit->id,
+							targetUnit->GetTransporter()->id
+						);
+					}
 					StopMoveAndFinishCommand();
 					return;
 				}
@@ -948,8 +1001,22 @@ void CMobileCAI::ExecuteAttack(Command& c)
 
 	// if our target is dead or we lost it then stop attacking
 	// NOTE: unit should actually just continue to target area!
-	if (targetDied || (c.GetNumParams() == 1 && UpdateTargetLostTimer(int(c.GetParam(0))) == 0)) {
+	int updatedTargetLostTimer = -1;
+	if (c.GetNumParams() == 1)
+		updatedTargetLostTimer = UpdateTargetLostTimer(int(c.GetParam(0)));
+	if (targetDied || (c.GetNumParams() == 1 && updatedTargetLostTimer == 0)) {
 		// cancel keeppointingto
+		if (replayCheckpointDebug) {
+			LOG("[ReplayCheckpoint][MobileCAI] attack-cancel frame=%d unit=%d reason=%s target=%d targetDied=%d targetLostTimer=%d orderTarget=%d",
+				gs->frameNum,
+				owner->id,
+				targetDied ? "target-died" : "target-lost",
+				(c.GetNumParams() >= 1) ? int(c.GetParam(0)) : -1,
+				targetDied ? 1 : 0,
+				updatedTargetLostTimer,
+				(orderTarget != nullptr) ? orderTarget->id : -1
+			);
+		}
 		StopMoveAndFinishCommand();
 		return;
 	}

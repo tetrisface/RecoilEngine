@@ -1,6 +1,7 @@
 /* This file is part of the Spring engine (GPL v2 or later), see LICENSE.html */
 
 #include <cassert>
+#include <cstring>
 
 #include "UnitHandler.h"
 #include "Unit.h"
@@ -15,15 +16,20 @@
 #include "Sim/Misc/GlobalSynced.h"
 #include "Sim/Misc/ModInfo.h"
 #include "Sim/Misc/TeamHandler.h"
+#include "Sim/MoveTypes/GroundMoveType.h"
 #include "Sim/MoveTypes/MoveType.h"
 #include "Sim/MoveTypes/Systems/GeneralMoveSystem.h"
 #include "Sim/MoveTypes/Systems/GroundMoveSystem.h"
 #include "Sim/MoveTypes/Systems/UnitTrapCheckSystem.h"
 #include "Sim/Path/IPathManager.h"
+#include "Sim/Projectiles/Projectile.h"
+#include "Sim/Projectiles/ProjectileHandler.h"
 #include "Sim/Weapons/Weapon.h"
 #include "System/EventHandler.h"
 #include "System/Log/ILog.h"
 #include "System/SpringMath.h"
+#include "System/SpringHash.h"
+#include "System/Sync/SyncChecker.h"
 #include "System/Threading/ThreadPool.h"
 #include "System/TimeProfiler.h"
 #include "System/creg/STL_Deque.h"
@@ -35,6 +41,199 @@
 #include "System/Config/ConfigHandler.h"
 CONFIG(bool, UpdateWeaponVectorsMT).deprecated(true);
 CONFIG(bool, UpdateBoundingVolumeMT).deprecated(true);
+
+static uint32_t ReplayCheckpointUnitHandlerHashInt(uint32_t hash, int value)
+{
+	return spring::LiteHash(&value, sizeof(value), hash);
+}
+
+static uint32_t ReplayCheckpointUnitHandlerHashUInt(uint32_t hash, uint32_t value)
+{
+	return spring::LiteHash(&value, sizeof(value), hash);
+}
+
+static uint32_t ReplayCheckpointUnitHandlerHashBool(uint32_t hash, bool value)
+{
+	return spring::LiteHash(&value, sizeof(value), hash);
+}
+
+static uint32_t ReplayCheckpointUnitHandlerHashFloat(uint32_t hash, float value)
+{
+	return spring::LiteHash(&value, sizeof(value), hash);
+}
+
+static uint32_t ReplayCheckpointUnitHandlerHashFloat3(uint32_t hash, const float3& value)
+{
+	hash = ReplayCheckpointUnitHandlerHashFloat(hash, value.x);
+	hash = ReplayCheckpointUnitHandlerHashFloat(hash, value.y);
+	hash = ReplayCheckpointUnitHandlerHashFloat(hash, value.z);
+	return hash;
+}
+
+static uint32_t ReplayCheckpointUnitHandlerHashFloat4(uint32_t hash, const float4& value)
+{
+	hash = ReplayCheckpointUnitHandlerHashFloat(hash, value.x);
+	hash = ReplayCheckpointUnitHandlerHashFloat(hash, value.y);
+	hash = ReplayCheckpointUnitHandlerHashFloat(hash, value.z);
+	hash = ReplayCheckpointUnitHandlerHashFloat(hash, value.w);
+	return hash;
+}
+
+static uint32_t ReplayCheckpointUnitHandlerHashUnitMoveState(const CUnit* unit)
+{
+	uint32_t hash = 0x31415926u;
+
+	hash = ReplayCheckpointUnitHandlerHashInt(hash, unit->id);
+	hash = ReplayCheckpointUnitHandlerHashInt(hash, unit->team);
+	hash = ReplayCheckpointUnitHandlerHashFloat3(hash, unit->pos);
+	hash = ReplayCheckpointUnitHandlerHashFloat4(hash, unit->speed);
+	hash = ReplayCheckpointUnitHandlerHashInt(hash, unit->heading);
+	hash = ReplayCheckpointUnitHandlerHashUInt(hash, static_cast<uint32_t>(unit->physicalState));
+	hash = ReplayCheckpointUnitHandlerHashUInt(hash, static_cast<uint32_t>(unit->collidableState));
+	hash = ReplayCheckpointUnitHandlerHashFloat3(hash, unit->frontdir);
+	hash = ReplayCheckpointUnitHandlerHashFloat3(hash, unit->rightdir);
+	hash = ReplayCheckpointUnitHandlerHashFloat3(hash, unit->updir);
+	hash = ReplayCheckpointUnitHandlerHashFloat3(hash, unit->midPos);
+	hash = ReplayCheckpointUnitHandlerHashFloat3(hash, unit->aimPos);
+
+	const AMoveType* moveType = unit->moveType;
+	hash = ReplayCheckpointUnitHandlerHashUInt(hash, static_cast<uint32_t>(moveType != nullptr));
+	if (moveType != nullptr) {
+		hash = ReplayCheckpointUnitHandlerHashFloat3(hash, moveType->goalPos);
+		hash = ReplayCheckpointUnitHandlerHashFloat3(hash, moveType->oldPos);
+		hash = ReplayCheckpointUnitHandlerHashFloat3(hash, moveType->oldSlowUpdatePos);
+		hash = ReplayCheckpointUnitHandlerHashFloat3(hash, moveType->oldCollisionUpdatePos);
+		hash = ReplayCheckpointUnitHandlerHashInt(hash, static_cast<int>(moveType->progressState));
+		hash = ReplayCheckpointUnitHandlerHashBool(hash, moveType->UseHeading());
+
+		const CGroundMoveType* groundMoveType = dynamic_cast<const CGroundMoveType*>(moveType);
+		hash = ReplayCheckpointUnitHandlerHashUInt(hash, static_cast<uint32_t>(groundMoveType != nullptr));
+		if (groundMoveType != nullptr) {
+			hash = ReplayCheckpointUnitHandlerHashFloat3(hash, groundMoveType->GetCurrWayPoint());
+			hash = ReplayCheckpointUnitHandlerHashFloat3(hash, groundMoveType->GetNextWayPoint());
+			hash = ReplayCheckpointUnitHandlerHashFloat3(hash, groundMoveType->GetEarlyCurrWayPoint());
+			hash = ReplayCheckpointUnitHandlerHashFloat3(hash, groundMoveType->GetEarlyNextWayPoint());
+			hash = ReplayCheckpointUnitHandlerHashFloat3(hash, groundMoveType->GetWaypointDir());
+			hash = ReplayCheckpointUnitHandlerHashFloat3(hash, groundMoveType->GetFlatFrontDir());
+			hash = ReplayCheckpointUnitHandlerHashFloat(hash, groundMoveType->GetWantedSpeed());
+			hash = ReplayCheckpointUnitHandlerHashFloat(hash, groundMoveType->GetCurrentSpeed());
+			hash = ReplayCheckpointUnitHandlerHashFloat(hash, groundMoveType->GetDeltaSpeed());
+			hash = ReplayCheckpointUnitHandlerHashFloat(hash, groundMoveType->GetCurrWayPointDist());
+			hash = ReplayCheckpointUnitHandlerHashFloat(hash, groundMoveType->GetPrevWayPointDist());
+			hash = ReplayCheckpointUnitHandlerHashUInt(hash, groundMoveType->GetPathID());
+			hash = ReplayCheckpointUnitHandlerHashUInt(hash, groundMoveType->GetNextPathID());
+			hash = ReplayCheckpointUnitHandlerHashBool(hash, groundMoveType->IsReversing());
+			hash = ReplayCheckpointUnitHandlerHashBool(hash, groundMoveType->IsAtGoal());
+			hash = ReplayCheckpointUnitHandlerHashBool(hash, groundMoveType->IsAtEndOfPath());
+			hash = ReplayCheckpointUnitHandlerHashBool(hash, groundMoveType->IsLastWaypoint());
+			hash = ReplayCheckpointUnitHandlerHashBool(hash, groundMoveType->IsUsingRawMovement());
+			hash = ReplayCheckpointUnitHandlerHashBool(hash, groundMoveType->IsPathingFailed());
+			hash = ReplayCheckpointUnitHandlerHashBool(hash, groundMoveType->IsPathingArrived());
+		}
+	}
+
+	return hash;
+}
+
+static void LogReplayCheckpointUnitHandlerSignature(
+	const char* label,
+	const std::vector<CUnit*>& activeUnits,
+	size_t activeSlowUpdateUnit,
+	size_t activeUpdateUnit
+) {
+	const int debugFrame = configHandler->GetInt("ReplayCheckpointDebugSignatureFrame");
+
+	if (debugFrame < 0 || gs == nullptr || gs->frameNum != debugFrame)
+		return;
+
+	const bool debugUnitDetails = (std::strcmp(label, "unit-update-begin") == 0);
+	uint32_t unitHash = 0x13572468u;
+	for (const CUnit* unit: activeUnits) {
+		if (unit == nullptr)
+			continue;
+
+		const uint32_t unitDetailHash = ReplayCheckpointUnitHandlerHashUnitMoveState(unit);
+		unitHash = ReplayCheckpointUnitHandlerHashUInt(unitHash, unitDetailHash);
+
+		const AMoveType* moveType = unit->moveType;
+		const CGroundMoveType* groundMoveType = (moveType != nullptr)? dynamic_cast<const CGroundMoveType*>(moveType): nullptr;
+
+		if (debugUnitDetails) {
+			const float3& goalPos = (moveType != nullptr)? moveType->goalPos: ZeroVector;
+			const float3& oldPos = (moveType != nullptr)? moveType->oldPos: ZeroVector;
+			const float3& oldSlowUpdatePos = (moveType != nullptr)? moveType->oldSlowUpdatePos: ZeroVector;
+			const float3& oldCollisionUpdatePos = (moveType != nullptr)? moveType->oldCollisionUpdatePos: ZeroVector;
+			const float3 currWayPoint = (groundMoveType != nullptr)? static_cast<float3>(groundMoveType->GetCurrWayPoint()): ZeroVector;
+			const float3 nextWayPoint = (groundMoveType != nullptr)? static_cast<float3>(groundMoveType->GetNextWayPoint()): ZeroVector;
+			const float3& earlyCurrWayPoint = (groundMoveType != nullptr)? groundMoveType->GetEarlyCurrWayPoint(): ZeroVector;
+			const float3& earlyNextWayPoint = (groundMoveType != nullptr)? groundMoveType->GetEarlyNextWayPoint(): ZeroVector;
+
+			LOG("[ReplayCheckpoint][unit-detail] %s frame=%d unit=%d hash=%08x team=%d pos=<%.8g,%.8g,%.8g> speed=<%.8g,%.8g,%.8g,%.8g> heading=%d phys=%u coll=%u goal=<%.8g,%.8g,%.8g> old=<%.8g,%.8g,%.8g> oldSlow=<%.8g,%.8g,%.8g> oldColl=<%.8g,%.8g,%.8g> progress=%d useHeading=%u gmt=%u cwp=<%.8g,%.8g,%.8g> nwp=<%.8g,%.8g,%.8g> ecwp=<%.8g,%.8g,%.8g> enwp=<%.8g,%.8g,%.8g> wanted=%.8g current=%.8g delta=%.8g cdist=%.8g pdist=%.8g path=%u nextPath=%u rev=%u atGoal=%u atEnd=%u lastWp=%u raw=%u failed=%u arrived=%u",
+				label,
+				gs->frameNum,
+				unit->id,
+				unitDetailHash,
+				unit->team,
+				unit->pos.x, unit->pos.y, unit->pos.z,
+				unit->speed.x, unit->speed.y, unit->speed.z, unit->speed.w,
+				static_cast<int>(unit->heading),
+				static_cast<unsigned int>(unit->physicalState),
+				static_cast<unsigned int>(unit->collidableState),
+				goalPos.x, goalPos.y, goalPos.z,
+				oldPos.x, oldPos.y, oldPos.z,
+				oldSlowUpdatePos.x, oldSlowUpdatePos.y, oldSlowUpdatePos.z,
+				oldCollisionUpdatePos.x, oldCollisionUpdatePos.y, oldCollisionUpdatePos.z,
+				(moveType != nullptr)? static_cast<int>(moveType->progressState): -1,
+				(moveType != nullptr && moveType->UseHeading())? 1u: 0u,
+				(groundMoveType != nullptr)? 1u: 0u,
+				currWayPoint.x, currWayPoint.y, currWayPoint.z,
+				nextWayPoint.x, nextWayPoint.y, nextWayPoint.z,
+				earlyCurrWayPoint.x, earlyCurrWayPoint.y, earlyCurrWayPoint.z,
+				earlyNextWayPoint.x, earlyNextWayPoint.y, earlyNextWayPoint.z,
+				(groundMoveType != nullptr)? groundMoveType->GetWantedSpeed(): 0.0f,
+				(groundMoveType != nullptr)? groundMoveType->GetCurrentSpeed(): 0.0f,
+				(groundMoveType != nullptr)? groundMoveType->GetDeltaSpeed(): 0.0f,
+				(groundMoveType != nullptr)? groundMoveType->GetCurrWayPointDist(): 0.0f,
+				(groundMoveType != nullptr)? groundMoveType->GetPrevWayPointDist(): 0.0f,
+				(groundMoveType != nullptr)? groundMoveType->GetPathID(): 0u,
+				(groundMoveType != nullptr)? groundMoveType->GetNextPathID(): 0u,
+				(groundMoveType != nullptr && groundMoveType->IsReversing())? 1u: 0u,
+				(groundMoveType != nullptr && groundMoveType->IsAtGoal())? 1u: 0u,
+				(groundMoveType != nullptr && groundMoveType->IsAtEndOfPath())? 1u: 0u,
+				(groundMoveType != nullptr && groundMoveType->IsLastWaypoint())? 1u: 0u,
+				(groundMoveType != nullptr && groundMoveType->IsUsingRawMovement())? 1u: 0u,
+				(groundMoveType != nullptr && groundMoveType->IsPathingFailed())? 1u: 0u,
+				(groundMoveType != nullptr && groundMoveType->IsPathingArrived())? 1u: 0u
+			);
+		}
+	}
+
+	uint32_t projectileHash = 0xabcdef01u;
+	const auto& syncedProjectiles = projectileHandler.GetActiveProjectiles(true);
+	for (const CProjectile* projectile: syncedProjectiles) {
+		if (projectile == nullptr)
+			continue;
+
+		projectileHash = ReplayCheckpointUnitHandlerHashInt(projectileHash, projectile->id);
+		projectileHash = ReplayCheckpointUnitHandlerHashUInt(projectileHash, projectile->GetOwnerID());
+		projectileHash = ReplayCheckpointUnitHandlerHashUInt(projectileHash, projectile->GetTeamID());
+		projectileHash = ReplayCheckpointUnitHandlerHashFloat3(projectileHash, projectile->pos);
+		projectileHash = ReplayCheckpointUnitHandlerHashFloat4(projectileHash, projectile->speed);
+	}
+
+	LOG("[ReplayCheckpoint][unit-sig] %s frame=%d sync=%08x rng=%llu units=%u unitHash=%08x unitCursor=%u/%u syncedProjectiles=%u projectileHash=%08x",
+		label,
+		gs->frameNum,
+		CSyncChecker::GetChecksum(),
+		static_cast<unsigned long long>(gsRNG.GetGenState()),
+		static_cast<unsigned int>(activeUnits.size()),
+		unitHash,
+		static_cast<unsigned int>(activeSlowUpdateUnit),
+		static_cast<unsigned int>(activeUpdateUnit),
+		static_cast<unsigned int>(syncedProjectiles.size()),
+		projectileHash
+	);
+}
 
 
 CR_BIND(CUnitHandler, )
@@ -443,13 +642,21 @@ void CUnitHandler::Update()
 {
 	inUpdateCall = true;
 
+	LogReplayCheckpointUnitHandlerSignature("unit-update-begin", activeUnits, activeSlowUpdateUnit, activeUpdateUnit);
 	DeleteUnits();
+	LogReplayCheckpointUnitHandlerSignature("after-delete-units", activeUnits, activeSlowUpdateUnit, activeUpdateUnit);
 	UpdateUnitMoveTypes();
+	LogReplayCheckpointUnitHandlerSignature("after-movetype-update", activeUnits, activeSlowUpdateUnit, activeUpdateUnit);
 	QueueDeleteUnits();
+	LogReplayCheckpointUnitHandlerSignature("after-queue-delete", activeUnits, activeSlowUpdateUnit, activeUpdateUnit);
 	UpdateUnitLosStates();
+	LogReplayCheckpointUnitHandlerSignature("after-los-update", activeUnits, activeSlowUpdateUnit, activeUpdateUnit);
 	SlowUpdateUnits();
+	LogReplayCheckpointUnitHandlerSignature("after-slow-update", activeUnits, activeSlowUpdateUnit, activeUpdateUnit);
 	UpdateUnits();
+	LogReplayCheckpointUnitHandlerSignature("after-unit-body-update", activeUnits, activeSlowUpdateUnit, activeUpdateUnit);
 	UpdateUnitWeapons();
+	LogReplayCheckpointUnitHandlerSignature("after-weapon-update", activeUnits, activeSlowUpdateUnit, activeUpdateUnit);
 
 	inUpdateCall = false;
 }
@@ -512,4 +719,3 @@ unsigned int CUnitHandler::CalcMaxUnits() const
 
 	return n;
 }
-

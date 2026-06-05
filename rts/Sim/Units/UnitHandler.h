@@ -67,6 +67,8 @@ public:
 	const std::vector<CUnit*>& GetUnitsToBeRemoved() const { return unitsToBeRemoved; }
 	const std::vector<CUnit*>& GetActiveUnits() const { return activeUnits; }
 	      std::vector<CUnit*>& GetActiveUnits()       { return activeUnits; }
+	size_t GetActiveSlowUpdateUnit() const { return activeSlowUpdateUnit; }
+	size_t GetActiveUpdateUnit() const { return activeUpdateUnit; }
 
 	const std::vector<CUnit*>& GetUnitsByTeam      (int teamNum               ) const { return unitsByDefs[teamNum][        0]; }
 	const std::vector<CUnit*>& GetUnitsByTeamAndDef(int teamNum, int unitDefID) const { return unitsByDefs[teamNum][unitDefID]; }
