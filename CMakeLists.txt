@@ -409,10 +409,12 @@ if(NOT MSVC)
 		set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fsignaling-nans")
 	endif()
 
-	## warning: space between quotes and suffix is deprecated in C++23
-	## [[nodiscard]] constexpr uint32_t operator"" _hs(const char* str, std::size_t) noexcept
-	## it's been quite annoying since we switched to C++23
-	set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-deprecated-literal-operator")
+	if (CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+		## warning: space between quotes and suffix is deprecated in C++23
+		## [[nodiscard]] constexpr uint32_t operator"" _hs(const char* str, std::size_t) noexcept
+		## it's been quite annoying since we switched to C++23
+		set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-deprecated-literal-operator")
+	endif()
 
 	### CompileTime Warnings
 	set(COMMON_WARNINGS "${COMMON_WARNINGS} -Wformat -Wformat-security")
