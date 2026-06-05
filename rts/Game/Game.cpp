@@ -88,6 +88,7 @@
 #include "Sim/Misc/Wind.h"
 #include "Sim/Misc/ResourceHandler.h"
 #include "Sim/MoveTypes/MoveDefHandler.h"
+#include "Sim/MoveTypes/GroundMoveType.h"
 #include "Sim/MoveTypes/MoveTypeFactory.h"
 #include "Sim/Path/IPathManager.h"
 #include "Sim/Projectiles/ExplosionGenerator.h"
@@ -259,6 +260,34 @@ static void LogReplayCheckpointStateSignature(const char* label)
 		featureHash,
 		static_cast<unsigned int>(syncedProjectiles.size()),
 		projectileHash
+	);
+}
+
+static void RebuildReplayCheckpointGroundMovePaths()
+{
+	unsigned int rebuiltPaths = 0;
+	unsigned int rebuiltUnits = 0;
+
+	for (CUnit* unit: unitHandler.GetActiveUnits()) {
+		if (unit == nullptr || unit->moveType == nullptr)
+			continue;
+
+		auto* groundMoveType = dynamic_cast<CGroundMoveType*>(unit->moveType);
+		if (groundMoveType == nullptr)
+			continue;
+
+		const unsigned int oldPathID = groundMoveType->GetPathID();
+		groundMoveType->RebuildPathAfterLoad();
+
+		if (oldPathID != 0) {
+			++rebuiltUnits;
+			rebuiltPaths += (groundMoveType->GetPathID() != 0);
+		}
+	}
+
+	LOG("[ReplayCheckpoint] rebuilt QTPFS ground move paths after load: %u/%u active path units",
+		rebuiltPaths,
+		rebuiltUnits
 	);
 }
 
@@ -2338,6 +2367,7 @@ bool CGame::LoadReplayCheckpoint(const std::string& checkpointPath, int checkpoi
 			CBuilderCaches::InitStatic();
 
 			pathManager->ResetLivePathsForLoad();
+			RebuildReplayCheckpointGroundMovePaths();
 			dumpReplayCheckpointDebugState("after-path-reset");
 
 			if (gameSetup != nullptr && gameSetup->hostDemo) {

@@ -34,6 +34,7 @@ public:
 	};
 
 	void PostLoad();
+	void RebuildPathAfterLoad();
 	void* GetPreallocContainer() { return owner; }  // creg
 
 	bool Update() override;

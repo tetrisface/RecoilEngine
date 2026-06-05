@@ -96,9 +96,9 @@ public:
 	void SanityCheckThreads(const CCobInstance* owner);
 
 	const auto& GetThreadInstances() const { return threadInstances; }
-//	const auto& GetTickAddedThreads() const { return tickAddedThreads; }
-//	const auto& GetTickRemovedThreads() const { return tickRemovedThreads; }
-//	const auto& GetRunningThreadIDs() const { return runningThreadIDs; }
+	const auto& GetTickAddedThreads() const { return tickAddedThreads; }
+	const auto& GetTickRemovedThreads() const { return tickRemovedThreads; }
+	const auto& GetRunningThreadIDs() const { return runningThreadIDs; }
 	const auto& GetWaitingThreadIDs() const { return waitingThreadIDs; }
 	const auto& GetSleepingThreadIDs() const { return sleepingThreadIDs; }
 	const auto  GetCurrTime() const { return currentTime; }

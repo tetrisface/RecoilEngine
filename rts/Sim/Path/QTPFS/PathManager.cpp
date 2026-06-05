@@ -316,7 +316,7 @@ void QTPFS::PathManager::ResetLivePathsForLoad()
 	sharedPaths.clear();
 	partialSharedPaths.clear();
 
-	LOG("[ReplayCheckpoint] reset QTPFS live paths for load: %u paths, %u searches",
+	LOG("[ReplayCheckpoint] reset QTPFS live paths for load: removed %u paths, %u searches",
 		static_cast<unsigned int>(pathEntities.size()),
 		static_cast<unsigned int>(searchEntities.size())
 	);

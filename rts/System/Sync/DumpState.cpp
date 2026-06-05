@@ -579,6 +579,10 @@ void DumpState(int newMinFrameNum, int newMaxFrameNum, int newFramePeriod, std::
 			auto ownerID = thread.cobInst->GetUnit() ? thread.cobInst->GetUnit()->id : -1;
 			file
 				<< "\t\t\tid: " << tid << " t.id " << thread.GetID() << " t.wt " << thread.GetWakeTime()
+				<< " t.pc " << thread.GetProgramCounter()
+				<< " t.paramc " << thread.GetParamCount()
+				<< " t.cbp " << thread.GetCallbackParam()
+				<< " t.waitAxisPiece " << thread.GetWaitAxis() << "|" << thread.GetWaitPiece()
 				<< " owner " << ownerID
 				<< " fn " << thread.cobFile->name
 				<< " code cs " << CheckSum(thread.cobFile->code)
@@ -589,11 +593,35 @@ void DumpState(int newMinFrameNum, int newMaxFrameNum, int newFramePeriod, std::
 				<< " scriptMap cs " << CheckSum(thread.cobFile->scriptIndex)
 				<< " t.state " << +thread.GetState() << " t.sigmask " << thread.GetSignalMask()
 				<< " t.retc " << thread.GetRetCode()
+				<< " luaArgs cs " << thread.GetLuaArgsChecksum()
+				<< " callStack size|cs " << thread.GetCallStackSize() << "|" << thread.GetCallStackChecksum()
+				<< " dataStack size|cs " << thread.GetDataStackSize() << "|" << thread.GetDataStackChecksum()
 				<< " dead|garbage|waiting " << thread.IsDead() << "|" << thread.IsGarbage() << "|" << thread.IsWaiting() << "\n";
 		}
+		file << "\t\tRunningThreads: " << cobEngine->GetRunningThreadIDs().size();
+		file << "\t\t\tids:";
+		for (const auto id : cobEngine->GetRunningThreadIDs()) {
+			file << " " << id;
+		}
+		file << "\n";
+
 		file << "\t\tWaitingThreads: " << cobEngine->GetWaitingThreadIDs().size();
 		file << "\t\t\tids:";
 		for (const auto id : cobEngine->GetWaitingThreadIDs()) {
+			file << " " << id;
+		}
+		file << "\n";
+
+		file << "\t\tTickAddedThreads: " << cobEngine->GetTickAddedThreads().size();
+		file << "\t\t\tids:";
+		for (const auto& thread : cobEngine->GetTickAddedThreads()) {
+			file << " " << thread.GetID();
+		}
+		file << "\n";
+
+		file << "\t\tTickRemovedThreads: " << cobEngine->GetTickRemovedThreads().size();
+		file << "\t\t\tids:";
+		for (const auto id : cobEngine->GetTickRemovedThreads()) {
 			file << " " << id;
 		}
 		file << "\n";

@@ -564,16 +564,47 @@ void CGroundMoveType::PostLoad()
 	}
 
 	Connect();
+}
 
-	// HACK: re-initialize path after load
-	if (pathID == 0)
+void CGroundMoveType::RebuildPathAfterLoad()
+{
+	RECOIL_DETAILED_TRACY_ZONE;
+
+	if ((uint8_t *)owner->moveType != owner->amtMemBuffer)
 		return;
 
-	// There isn't a path to clear (we've just loaded a saved game), so we must now clear pathID
-	// before requesting our new path; otherwise, a valid path for another unit could be deleted.
+	const auto rebuildPath = [this](unsigned int loadedPathID) -> unsigned int {
+		if (loadedPathID == 0)
+			return 0;
+
+		return pathManager->RequestPathWithID(
+			owner,
+			owner->moveDef,
+			owner->pos,
+			goalPos,
+			goalRadius + extraRadius,
+			true,
+			loadedPathID,
+			true
+		);
+	};
+
 	const unsigned int loadedPathID = pathID;
+	const unsigned int loadedNextPathID = nextPathId;
+
 	pathID = 0;
-	pathID = pathManager->RequestPathWithID(owner, owner->moveDef, owner->pos, goalPos, goalRadius + extraRadius, true, loadedPathID);
+	nextPathId = 0;
+	deletePathId = 0;
+
+	pathID = rebuildPath(loadedPathID);
+	nextPathId = rebuildPath(loadedNextPathID);
+
+	if (pathID != 0) {
+		atGoal = false;
+		atEndOfPath = false;
+		pathController.SetRealGoalPosition(pathID, goalPos);
+		pathController.SetTempGoalPosition(pathID, currWayPoint);
+	}
 }
 
 bool CGroundMoveType::OwnerMoved(const short oldHeading, const float3& posDif, const float3& cmpEps) {

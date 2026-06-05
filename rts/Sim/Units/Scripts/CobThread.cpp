@@ -12,6 +12,7 @@
 #include "Sim/Misc/GlobalSynced.h"
 
 #include "System/Misc/TracyDefs.h"
+#include "System/SpringHash.h"
 
 CR_BIND(CCobThread, )
 
@@ -141,6 +142,27 @@ CCobThread& CCobThread::operator = (const CCobThread& t) {
 	cobInst = t.cobInst;
 	cobFile = t.cobFile;
 	return *this;
+}
+
+uint32_t CCobThread::GetLuaArgsChecksum() const
+{
+	return spring::LiteHash(luaArgs, sizeof(luaArgs));
+}
+
+uint32_t CCobThread::GetCallStackChecksum() const
+{
+	if (callStack.empty())
+		return 0u;
+
+	return spring::LiteHash(callStack.data(), static_cast<uint32_t>(callStack.size() * sizeof(CallInfo)));
+}
+
+uint32_t CCobThread::GetDataStackChecksum() const
+{
+	if (dataStack.empty())
+		return 0u;
+
+	return spring::LiteHash(dataStack.data(), static_cast<uint32_t>(dataStack.size() * sizeof(int)));
 }
 
 
@@ -850,4 +872,3 @@ void CCobThread::AnimFinished(CUnitScript::AnimType type, int piece, int axis)
 
 	cobEngine->ScheduleThread(this);
 }
-

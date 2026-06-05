@@ -3,6 +3,8 @@
 #ifndef COB_THREAD_H
 #define COB_THREAD_H
 
+#include <cstdint>
+#include <cstddef>
 #include <string>
 #include <array>
 
@@ -103,9 +105,19 @@ public:
 	int GetID() const { return id; }
 	int GetStackVal(int pos) const { return dataStack[pos]; }
 	int GetWakeTime() const { return wakeTime; }
+	int GetProgramCounter() const { return pc; }
+	int GetParamCount() const { return paramCount; }
 	int GetRetCode() const { return retCode; }
+	int GetCallbackParam() const { return cbParam; }
 	int GetSignalMask() const { return signalMask; }
+	int GetWaitAxis() const { return waitAxis; }
+	int GetWaitPiece() const { return waitPiece; }
 	State GetState() const { return state; }
+	uint32_t GetLuaArgsChecksum() const;
+	uint32_t GetCallStackChecksum() const;
+	uint32_t GetDataStackChecksum() const;
+	std::size_t GetCallStackSize() const { return callStack.size(); }
+	std::size_t GetDataStackSize() const { return dataStack.size(); }
 
 	bool Reschedule(CUnitScript::AnimType type) const {
 		return ((state == WaitMove && type == CCobInstance::AMove) || (state == WaitTurn && type == CCobInstance::ATurn) || (state == WaitScale && type == CCobInstance::AScale));
