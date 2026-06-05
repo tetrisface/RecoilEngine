@@ -12,6 +12,7 @@
 
 struct MoveDef;
 class CSolidObject;
+namespace creg { class ISerializer; }
 
 class IPathManager {
 public:
@@ -50,6 +51,8 @@ public:
 	virtual void DeletePath(unsigned int pathID, bool force = false) {}
 
 	virtual void ResetLivePathsForLoad() {}
+	virtual void RestoreReplayCheckpointPathAllocator() {}
+	virtual void SerializeReplayCheckpointState(creg::ISerializer* s) {}
 
 	/**
 	 * Returns the next waypoint of the path.

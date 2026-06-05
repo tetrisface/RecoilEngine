@@ -9,6 +9,7 @@
 #include "Map/MapDamage.h"
 #include "Map/ReadMap.h"
 #include "Game/Game.h"
+#include "Game/GameHelper.h"
 #include "Game/GameSetup.h"
 #include "Game/GameVersion.h"
 #include "Game/GlobalUnsynced.h"
@@ -31,7 +32,9 @@
 #include "Sim/Misc/QuadField.h"
 #include "Sim/Misc/CategoryHandler.h"
 #include "Sim/Misc/GlobalSynced.h"
+#include "Sim/Misc/SmoothHeightMesh.h"
 #include "Sim/MoveTypes/MoveDefHandler.h"
+#include "Sim/Path/IPathManager.h"
 #include "Sim/Misc/TeamHandler.h"
 #include "Sim/Misc/Wind.h"
 #include "Sim/Misc/YardmapStatusEffectsMap.h"
@@ -106,10 +109,13 @@ void CGameStateCollector::Serialize(creg::ISerializer* s)
 	s->SerializeObjectInstance(gu, gu->GetClass());
 	s->SerializeObjectInstance(gameSetup, gameSetup->GetClass());
 	s->SerializeObjectInstance(game, game->GetClass());
+	s->SerializeObjectInstance(helper, helper->GetClass());
 	s->SerializeObjectInstance(readMap, readMap->GetClass());
+	smoothGround.SerializeReplayCheckpoint(s);
 	if (mapDamage != nullptr && !mapDamage->Disabled())
 		s->SerializeObjectInstance(mapDamage, mapDamage->GetClass());
 	s->SerializeObjectInstance(&quadField, quadField.GetClass());
+	pathManager->SerializeReplayCheckpointState(s);
 	s->SerializeObjectInstance(&unitHandler, unitHandler.GetClass());
 	s->SerializeObjectInstance(&globalUnitParams, globalUnitParams.GetClass());
 	s->SerializeObjectInstance(cobEngine, cobEngine->GetClass());
@@ -117,6 +123,7 @@ void CGameStateCollector::Serialize(creg::ISerializer* s)
 	s->SerializeObjectInstance(&CNullUnitScript::value, CNullUnitScript::value.GetClass());
 	s->SerializeObjectInstance(&featureHandler, featureHandler.GetClass());
 	s->SerializeObjectInstance(losHandler, losHandler->GetClass());
+	losHandler->SerializeReplayCheckpointLosMaps(s);
 	s->SerializeObjectInstance(&interceptHandler, interceptHandler.GetClass());
 	s->SerializeObjectInstance(CCategoryHandler::Instance(), CCategoryHandler::Instance()->GetClass());
 	s->SerializeObjectInstance(&groundBlockingObjectMap, groundBlockingObjectMap.GetClass());

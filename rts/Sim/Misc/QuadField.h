@@ -161,6 +161,8 @@ public:
 	void MovedRepulser(CPlasmaRepulser* repulser);
 	void RemoveRepulser(CPlasmaRepulser* repulser);
 
+	void RebuildForLoad();
+
 	// Note: ensure ReleaseVector is called in the same thread as original quad field query generated.
 
 	void ReleaseVector(std::vector<CUnit*>* v       , int onThread = 0) { tempUnits[onThread].ReleaseVector(v); }

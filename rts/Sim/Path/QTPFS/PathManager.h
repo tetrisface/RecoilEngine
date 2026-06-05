@@ -56,6 +56,8 @@ namespace QTPFS {
 		void UpdatePath(const CSolidObject* owner, unsigned int pathID) override;
 		void DeletePath(unsigned int pathID, bool force = false) override;
 		void ResetLivePathsForLoad() override;
+		void RestoreReplayCheckpointPathAllocator() override;
+		void SerializeReplayCheckpointState(creg::ISerializer* s) override;
 		void DeletePathEntity(QTPFS::entity pathEntity);
 
 		unsigned int RequestPath(
@@ -215,6 +217,9 @@ namespace QTPFS {
 		std::uint32_t pfsCheckSum;
 
 		QTPFS::entity systemEntity = entt::null;
+		std::vector<QTPFS::entity> replayCheckpointRegistryEntities;
+		QTPFS::entity replayCheckpointRegistryReleased = entt::null;
+		bool replayCheckpointRegistryLoaded = false;
 
 		bool isFinalized = false;
 

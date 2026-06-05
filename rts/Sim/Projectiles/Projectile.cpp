@@ -30,7 +30,7 @@ CR_REG_METADATA(CProjectile,
 	CR_MEMBER(checkCol),
 	CR_MEMBER(ignoreWater),
 
-	CR_IGNORED(createMe),
+	CR_MEMBER(createMe),
 	CR_MEMBER(deleteMe),
 
 	CR_MEMBER(drawSorted),

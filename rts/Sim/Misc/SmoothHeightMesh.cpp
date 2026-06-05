@@ -14,6 +14,10 @@
 #include "System/SpringMath.h"
 #include "System/TimeProfiler.h"
 #include "System/Threading/ThreadPool.h"
+#ifdef USING_CREG
+#include "System/creg/ISerializer.h"
+#include "System/creg/TypeDeduction.h"
+#endif
 
 #include "System/Misc/TracyDefs.h"
 
@@ -33,6 +37,47 @@ using namespace SmoothHeightMeshNamespace;
 #endif
 
 SmoothHeightMesh smoothGround;
+
+#ifdef USING_CREG
+static void SerializeReplayCheckpointQueue(creg::ISerializer* s, std::queue<int>& queue)
+{
+	std::vector<int> values;
+
+	if (s->IsWriting()) {
+		std::queue<int> copy = queue;
+		values.reserve(copy.size());
+
+		while (!copy.empty()) {
+			values.push_back(copy.front());
+			copy.pop();
+		}
+	}
+
+	std::unique_ptr<creg::IType> valuesType = creg::DeduceType<decltype(values)>::Get();
+	valuesType->Serialize(s, &values);
+
+	if (!s->IsWriting()) {
+		queue = std::queue<int>();
+
+		for (int value: values) {
+			queue.push(value);
+		}
+	}
+}
+
+template<typename T>
+static void SerializeReplayCheckpointValue(creg::ISerializer* s, T& value)
+{
+	s->Serialize(&value, sizeof(T));
+}
+
+template<typename T>
+static void SerializeReplayCheckpointVector(creg::ISerializer* s, std::vector<T>& value)
+{
+	std::unique_ptr<creg::IType> valueType = creg::DeduceType<std::vector<T>>::Get();
+	valueType->Serialize(s, &value);
+}
+#endif
 
 
 static float Interpolate(float x, float y, const int maxx, const int maxy, const float res, const float* heightmap)
@@ -650,6 +695,37 @@ void SmoothHeightMesh::MakeSmoothMesh() {
 
 	// tempMesh should be kept inline with mesh to avoid bluring artefacts in dynamic updates
 	std::copy(mesh.begin(), mesh.end(), tempMesh.begin());
+}
+
+void SmoothHeightMesh::SerializeReplayCheckpoint(creg::ISerializer* s)
+{
+#ifdef USING_CREG
+	SerializeReplayCheckpointValue(s, enabled);
+	SerializeReplayCheckpointValue(s, maxx);
+	SerializeReplayCheckpointValue(s, maxy);
+	SerializeReplayCheckpointValue(s, fmaxx);
+	SerializeReplayCheckpointValue(s, fmaxy);
+	SerializeReplayCheckpointValue(s, fresolution);
+	SerializeReplayCheckpointValue(s, resolution);
+	SerializeReplayCheckpointValue(s, smoothRadius);
+
+	SerializeReplayCheckpointVector(s, maximaMesh);
+	SerializeReplayCheckpointVector(s, mesh);
+	SerializeReplayCheckpointVector(s, tempMesh);
+	SerializeReplayCheckpointVector(s, origMesh);
+	SerializeReplayCheckpointVector(s, colsMaxima);
+	SerializeReplayCheckpointVector(s, maximaRows);
+
+	SerializeReplayCheckpointVector(s, mapChangeTrack.damageMap);
+	SerializeReplayCheckpointQueue(s, mapChangeTrack.damageQueue[0]);
+	SerializeReplayCheckpointQueue(s, mapChangeTrack.damageQueue[1]);
+	SerializeReplayCheckpointQueue(s, mapChangeTrack.horizontalBlurQueue);
+	SerializeReplayCheckpointQueue(s, mapChangeTrack.verticalBlurQueue);
+	SerializeReplayCheckpointValue(s, mapChangeTrack.width);
+	SerializeReplayCheckpointValue(s, mapChangeTrack.height);
+	SerializeReplayCheckpointValue(s, mapChangeTrack.queueReleaseOnFrame);
+	SerializeReplayCheckpointValue(s, mapChangeTrack.activeBuffer);
+#endif
 }
 
 

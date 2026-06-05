@@ -15,6 +15,9 @@
 #include "System/SafeUtil.h"
 #include "System/TimeProfiler.h"
 #include "System/Threading/ThreadPool.h"
+#ifdef USING_CREG
+#include "System/creg/TypeDeduction.h"
+#endif
 
 #include "System/Misc/TracyDefs.h"
 
@@ -78,6 +81,45 @@ size_t ILosType::cacheRefs  = 1;
 constexpr float CLosHandler::defBaseRadarErrorSize;
 constexpr float CLosHandler::defBaseRadarErrorMult;
 constexpr SLosInstance::RLE SLosInstance::EMPTY_RLE;
+
+using ReplayCheckpointLosMapSnapshot = std::vector<std::vector<std::vector<unsigned short>>>;
+
+static ReplayCheckpointLosMapSnapshot CaptureReplayCheckpointLosMaps(const std::array<ILosType*, 7>& losTypes)
+{
+	ReplayCheckpointLosMapSnapshot maps;
+	maps.resize(losTypes.size());
+
+	for (size_t typeIdx = 0; typeIdx < losTypes.size(); ++typeIdx) {
+		const ILosType* lt = losTypes[typeIdx];
+		if (lt == nullptr)
+			continue;
+
+		maps[typeIdx].resize(lt->losMaps.size());
+
+		for (size_t allyTeamIdx = 0; allyTeamIdx < lt->losMaps.size(); ++allyTeamIdx) {
+			maps[typeIdx][allyTeamIdx] = lt->losMaps[allyTeamIdx].GetLosMap();
+		}
+	}
+
+	return maps;
+}
+
+static void RestoreReplayCheckpointLosMaps(const ReplayCheckpointLosMapSnapshot& maps, const std::array<ILosType*, 7>& losTypes)
+{
+	for (size_t typeIdx = 0; typeIdx < std::min(maps.size(), losTypes.size()); ++typeIdx) {
+		ILosType* lt = losTypes[typeIdx];
+		if (lt == nullptr)
+			continue;
+
+		for (size_t allyTeamIdx = 0; allyTeamIdx < std::min(maps[typeIdx].size(), lt->losMaps.size()); ++allyTeamIdx) {
+			const auto& savedMap = maps[typeIdx][allyTeamIdx];
+			if (savedMap.size() != lt->losMaps[allyTeamIdx].GetLosMap().size())
+				continue;
+
+			lt->losMaps[allyTeamIdx].SetLosMap(savedMap);
+		}
+	}
+}
 
 
 void ILosType::Init(const int mipLevel_, LosType type_)
@@ -766,6 +808,45 @@ void CLosHandler::Kill()
 	);
 
 	losTypes.fill(nullptr);
+}
+
+void CLosHandler::ResetLiveMapsForLoad()
+{
+	RECOIL_DETAILED_TRACY_ZONE;
+
+	const ReplayCheckpointLosMapSnapshot savedMaps = CaptureReplayCheckpointLosMaps(losTypes);
+
+	for (ILosType* lt: losTypes) {
+		lt->Kill();
+		lt->Init(lt->mipLevel, lt->type);
+	}
+
+	for (CUnit* unit: unitHandler.GetActiveUnits()) {
+		unit->los.fill(nullptr);
+	}
+
+	Update();
+	RestoreReplayCheckpointLosMaps(savedMaps, losTypes);
+
+	LOG("[ReplayCheckpoint] reset LOS maps for load from %u active units",
+		static_cast<unsigned int>(unitHandler.GetActiveUnits().size())
+	);
+}
+
+void CLosHandler::SerializeReplayCheckpointLosMaps(creg::ISerializer* s)
+{
+#ifdef USING_CREG
+	ReplayCheckpointLosMapSnapshot maps;
+
+	if (s->IsWriting())
+		maps = CaptureReplayCheckpointLosMaps(losTypes);
+
+	std::unique_ptr<creg::IType> mapType = creg::DeduceType<decltype(maps)>::Get();
+	mapType->Serialize(s, &maps);
+
+	if (!s->IsWriting())
+		RestoreReplayCheckpointLosMaps(maps, losTypes);
+#endif
 }
 
 

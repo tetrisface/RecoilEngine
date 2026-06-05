@@ -11,6 +11,7 @@
 #include "System/type2.h"
 
 class CGround;
+namespace creg { class ISerializer; }
 
 namespace SmoothHeightMeshNamespace {
 	constexpr int SMOOTH_MESH_UPDATE_DELAY = GAME_SPEED;
@@ -60,6 +61,7 @@ public:
 	void MapChanged(int x1, int z1, int x2, int z2);
 
 	void MakeSmoothMesh();
+	void SerializeReplayCheckpoint(creg::ISerializer* s);
 
 private:
 	void InitMapChangeTracking();

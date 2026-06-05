@@ -585,7 +585,7 @@ void CGroundMoveType::RebuildPathAfterLoad()
 			goalRadius + extraRadius,
 			true,
 			loadedPathID,
-			true
+			false
 		);
 	};
 
@@ -600,8 +600,6 @@ void CGroundMoveType::RebuildPathAfterLoad()
 	nextPathId = rebuildPath(loadedNextPathID);
 
 	if (pathID != 0) {
-		atGoal = false;
-		atEndOfPath = false;
 		pathController.SetRealGoalPosition(pathID, goalPos);
 		pathController.SetTempGoalPosition(pathID, currWayPoint);
 	}

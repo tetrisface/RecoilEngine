@@ -11,6 +11,7 @@
 #include "System/float3.h"
 #include "System/float4.h"
 #include "System/type2.h"
+#include "System/creg/creg_cond.h"
 
 #include <array>
 #include <bit>
@@ -114,6 +115,8 @@ struct CExplosionParams {
 
 class CGameHelper
 {
+	CR_DECLARE_STRUCT(CGameHelper)
+
 public:
 	enum BuildSquareStatus {
 		BUILDSQUARE_BLOCKED     = 0,
@@ -244,6 +247,9 @@ public:
 
 private:
 	struct WaitingDamage {
+		CR_DECLARE_STRUCT(WaitingDamage)
+
+		WaitingDamage() = default;
 		WaitingDamage(const DamageArray& _damage, const float3& _impulse, int _attackerID, int _targetID, int _weaponID, int _projectileID)
 		: attackerID(_attackerID)
 		, targetID(_targetID)
@@ -253,10 +259,10 @@ private:
 		, impulse(_impulse)
 		{}
 
-		int attackerID;
-		int targetID;
-		int weaponID;
-		int projectileID;
+		int attackerID = -1;
+		int targetID = -1;
+		int weaponID = -1;
+		int projectileID = -1;
 
 		DamageArray damage;
 		float3 impulse;

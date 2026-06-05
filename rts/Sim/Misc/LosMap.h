@@ -53,6 +53,7 @@ public:
 	// FIXME temp fix for CBaseGroundDrawer and AI interface, which need raw data
 	const unsigned short& front() const { return losmap.front(); }
 	const auto& GetLosMap() const { return losmap; }
+	void SetLosMap(const std::vector<unsigned short>& map) { losmap = map; }
 private:
 	void LosAdd(SLosInstance* instance) const;
 	void UnsafeLosAdd(SLosInstance* instance) const;

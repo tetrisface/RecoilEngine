@@ -13,8 +13,11 @@
 
 #ifndef UNIT_TEST
 	#include "Sim/Features/Feature.h"
+	#include "Sim/Features/FeatureHandler.h"
 	#include "Sim/Projectiles/Projectile.h"
+	#include "Sim/Projectiles/ProjectileHandler.h"
 	#include "Sim/Units/Unit.h"
+	#include "Sim/Units/UnitHandler.h"
 	#include "Sim/Weapons/PlasmaRepulser.h"
 #endif
 
@@ -117,6 +120,48 @@ void CQuadField::Kill()
 
 	for (auto cache : tempQuads)
 		cache.ReleaseAll();
+}
+
+void CQuadField::RebuildForLoad()
+{
+	RECOIL_DETAILED_TRACY_ZONE;
+#ifndef UNIT_TEST
+	for (Quad& quad: baseQuads) {
+		quad.Clear();
+	}
+
+	for (CUnit* unit: unitHandler.GetActiveUnits()) {
+		if (unit == nullptr)
+			continue;
+
+		unit->quads.clear();
+		MovedUnit(unit);
+	}
+
+	std::vector<int> featureIDs;
+	featureIDs.reserve(featureHandler.GetActiveFeatureIDs().size());
+
+	for (const int featureID: featureHandler.GetActiveFeatureIDs()) {
+		featureIDs.push_back(featureID);
+	}
+
+	std::sort(featureIDs.begin(), featureIDs.end());
+
+	for (const int featureID: featureIDs) {
+		CFeature* feature = featureHandler.GetFeature(featureID);
+
+		if (feature != nullptr)
+			AddFeature(feature);
+	}
+
+	for (CProjectile* projectile: projectileHandler.GetActiveProjectiles(true)) {
+		if (projectile == nullptr)
+			continue;
+
+		projectile->quads.clear();
+		AddProjectile(projectile);
+	}
+#endif
 }
 
 

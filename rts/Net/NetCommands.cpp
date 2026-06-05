@@ -664,6 +664,11 @@ void CGame::ClientReadNet()
 				// This is already well covered in SimFrame so not adding scope.
 				// ZoneScopedN("Net::NewFrame");
 
+				if (gameSetup != nullptr && gameSetup->hostDemo && gameServer != nullptr && !gameServer->IsPaused() && gs->paused) {
+					LOG("[ReplayCheckpoint] clearing stale local pause state before replay NEWFRAME at frame %d", gs->frameNum);
+					gs->paused = false;
+				}
+
 				// Just a checkpoint for the speed factors plots.
 				TracyPlot(tracingSpeedFactor, gs->speedFactor);
 				TracyPlot(tracingWantedSpeedFactor, gs->wantedSpeedFactor);

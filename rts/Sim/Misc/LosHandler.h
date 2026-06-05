@@ -15,6 +15,8 @@
 #include "System/EventClient.h"
 #include "System/UnorderedMap.hpp"
 
+namespace creg { class ISerializer; }
+
 
 /**
  * LoS Instance
@@ -214,6 +216,8 @@ public:
 
 	void Init();
 	void Kill();
+	void ResetLiveMapsForLoad();
+	void SerializeReplayCheckpointLosMaps(creg::ISerializer* s);
 
 	// the Interface
 	bool InLos(const CUnit* unit, int allyTeam) const;

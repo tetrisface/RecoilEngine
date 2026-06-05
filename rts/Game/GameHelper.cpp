@@ -46,6 +46,23 @@
 static CGameHelper gGameHelper;
 CGameHelper* helper = &gGameHelper;
 
+CR_BIND(CGameHelper::WaitingDamage, )
+
+CR_REG_METADATA(CGameHelper::WaitingDamage, (
+	CR_MEMBER(attackerID),
+	CR_MEMBER(targetID),
+	CR_MEMBER(weaponID),
+	CR_MEMBER(projectileID),
+	CR_MEMBER(damage),
+	CR_MEMBER(impulse)
+))
+
+CR_BIND(CGameHelper, )
+
+CR_REG_METADATA(CGameHelper, (
+	CR_MEMBER(waitingDamages)
+))
+
 void CGameHelper::Init()
 {
 	RECOIL_DETAILED_TRACY_ZONE;

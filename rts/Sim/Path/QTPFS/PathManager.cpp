@@ -36,6 +36,10 @@
 #include "System/Rectangle.h"
 #include "System/TimeProfiler.h"
 #include "System/StringUtil.h"
+#ifdef USING_CREG
+#include "System/creg/ISerializer.h"
+#include "System/creg/TypeDeduction.h"
+#endif
 
 #include "Components/Path.h"
 #include "Components/PathSpeedModInfo.h"
@@ -279,47 +283,103 @@ void QTPFS::PathManager::ResetLivePathsForLoad()
 	RECOIL_DETAILED_TRACY_ZONE;
 	assert(!ThreadPool::IsInMultiThreadedSection());
 
-	std::vector<QTPFS::entity> pathEntities;
-	std::vector<QTPFS::entity> searchEntities;
+	unsigned int pathEntities = 0;
+	unsigned int searchEntities = 0;
+	unsigned int liveEntities = 0;
 
-	registry.each([this, &pathEntities, &searchEntities](auto entity) {
+	registry.each([this, &pathEntities, &searchEntities, &liveEntities](auto entity) {
+		++liveEntities;
+
 		if (entity == systemEntity)
 			return;
 
 		if (registry.any_of<IPath, UnsyncedIPath, ExternallyManagedSyncedIPath>(entity)) {
-			pathEntities.push_back(entity);
+			++pathEntities;
 			return;
 		}
 
 		if (registry.any_of<PathSearch, UnsyncedPathSearch, ExternallyManagedPathSearch>(entity))
-			searchEntities.push_back(entity);
+			++searchEntities;
 	});
 
-	for (const auto entity: pathEntities) {
-		if (!registry.valid(entity))
-			continue;
-
-		if (registry.any_of<IPath, UnsyncedIPath, ExternallyManagedSyncedIPath>(entity))
-			DeletePathEntity(entity);
-	}
-
-	for (const auto entity: searchEntities) {
-		if (!registry.valid(entity))
-			continue;
-
-		if (registry.any_of<PathSearch, UnsyncedPathSearch, ExternallyManagedPathSearch>(entity))
-			DestroyPathSearchEntity(entity);
-	}
+	RequeuePathsSystem::Shutdown();
+	PathSpeedModInfoSystem::Shutdown();
+	RemoveDeadPathsSystem::Shutdown();
+	SyncUpdatedPathsSystem::Shutdown();
 
 	std::for_each(pathTraces.begin(), pathTraces.end(), [](std::pair<unsigned int, QTPFS::PathSearchTrace::Execution*>& t){ delete t.second; });
 	pathTraces.clear();
 	sharedPaths.clear();
 	partialSharedPaths.clear();
 
-	LOG("[ReplayCheckpoint] reset QTPFS live paths for load: removed %u paths, %u searches",
-		static_cast<unsigned int>(pathEntities.size()),
-		static_cast<unsigned int>(searchEntities.size())
+	registry = decltype(registry){};
+	if (replayCheckpointRegistryLoaded && !replayCheckpointRegistryEntities.empty()) {
+		registry.assign(
+			replayCheckpointRegistryEntities.begin(),
+			replayCheckpointRegistryEntities.end(),
+			replayCheckpointRegistryReleased
+		);
+		systemEntity = replayCheckpointRegistryEntities[0];
+		assert(registry.valid(systemEntity));
+	} else {
+		systemEntity = registry.create();
+	}
+	assert(entt::to_entity(systemEntity) == 0);
+
+	SyncUpdatedPathsSystem::Init();
+	RemoveDeadPathsSystem::Init();
+	PathSpeedModInfoSystem::Init();
+	RequeuePathsSystem::Init();
+
+	LOG("[ReplayCheckpoint] reset QTPFS registry for load: removed %u live entities (%u paths, %u searches)",
+		liveEntities,
+		pathEntities,
+		searchEntities
 	);
+}
+
+void QTPFS::PathManager::SerializeReplayCheckpointState(creg::ISerializer* s)
+{
+#ifdef USING_CREG
+	if (s->IsWriting()) {
+		replayCheckpointRegistryEntities.assign(registry.data(), registry.data() + registry.size());
+		replayCheckpointRegistryReleased = registry.released();
+	}
+
+	std::unique_ptr<creg::IType> entitiesType = creg::DeduceType<decltype(replayCheckpointRegistryEntities)>::Get();
+	entitiesType->Serialize(s, &replayCheckpointRegistryEntities);
+	s->Serialize(&replayCheckpointRegistryReleased, sizeof(replayCheckpointRegistryReleased));
+
+	if (!s->IsWriting()) {
+		replayCheckpointRegistryLoaded = true;
+	}
+#endif
+}
+
+void QTPFS::PathManager::RestoreReplayCheckpointPathAllocator()
+{
+	RECOIL_DETAILED_TRACY_ZONE;
+
+	if (!replayCheckpointRegistryLoaded || replayCheckpointRegistryEntities.empty())
+		return;
+
+	unsigned int liveSearches = 0;
+	registry.each([&liveSearches](auto entity) {
+		liveSearches += registry.any_of<PathSearch, UnsyncedPathSearch, ExternallyManagedPathSearch>(entity);
+	});
+
+	if (liveSearches != 0) {
+		LOG_L(L_WARNING, "[ReplayCheckpoint] restoring QTPFS allocator with %u live path searches", liveSearches);
+	}
+
+	registry.assign_preserving_alive(
+		replayCheckpointRegistryEntities.begin(),
+		replayCheckpointRegistryEntities.end(),
+		replayCheckpointRegistryReleased
+	);
+	systemEntity = replayCheckpointRegistryEntities[0];
+	assert(registry.valid(systemEntity));
+	assert(entt::to_entity(systemEntity) == 0);
 }
 
 std::int64_t QTPFS::PathManager::Finalize() {
@@ -1371,9 +1431,15 @@ unsigned int QTPFS::PathManager::QueueSearch(
 	//     calls DeletePath, which ensures any path is removed
 	//     from its cache before we get to ExecuteSearch
 
-	QTPFS::entity pathEntity = (preferredPathID != 0)
-		? registry.create(QTPFS::entity(preferredPathID))
-		: registry.create();
+	QTPFS::entity pathEntity = entt::null;
+	if (preferredPathID != 0) {
+		const QTPFS::entity preferredPathEntity = QTPFS::entity(preferredPathID);
+		pathEntity = (registry.valid(preferredPathEntity) && registry.orphan(preferredPathEntity))
+			? preferredPathEntity
+			: registry.create(preferredPathEntity);
+	} else {
+		pathEntity = registry.create();
+	}
 	if (preferredPathID != 0 && static_cast<unsigned int>(entt::to_integral(pathEntity)) != preferredPathID) {
 		LOG_L(L_WARNING, "[ReplayCheckpoint] requested QTPFS path id %u but allocated %u",
 			preferredPathID,
@@ -1731,7 +1797,7 @@ unsigned int QTPFS::PathManager::RequestPathWithID(
 
 	assert(sourcePoint.x != 0.f || sourcePoint.z != 0.f);
 
-	returnPathId = QueueSearch(object, moveDef, sourcePoint, targetPoint, radius, synced, (synced && object != nullptr), false, preferredPathID);
+	returnPathId = QueueSearch(object, moveDef, sourcePoint, targetPoint, radius, synced, immediateResult, false, preferredPathID);
 
 	if (immediateResult && returnPathId != 0) {
 		assert(object == nullptr);

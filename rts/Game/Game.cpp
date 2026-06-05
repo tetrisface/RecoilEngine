@@ -2362,12 +2362,21 @@ bool CGame::LoadReplayCheckpoint(const std::string& checkpointPath, int checkpoi
 				auto lock = CLoadLock::GetUniqueLock();
 				loadSaveHandler.LoadGame();
 			}
+			losHandler->ResetLiveMapsForLoad();
 			dumpReplayCheckpointDebugState("after-creg-load");
+
+			quadField.RebuildForLoad();
+			LOG("[ReplayCheckpoint] rebuilt quadfield occupancy after load");
+			dumpReplayCheckpointDebugState("after-quadfield-rebuild");
 
 			CBuilderCaches::InitStatic();
 
 			pathManager->ResetLivePathsForLoad();
 			RebuildReplayCheckpointGroundMovePaths();
+			for (int update = 0; update < 3; ++update)
+				pathManager->Update();
+			pathManager->RestoreReplayCheckpointPathAllocator();
+			LOG("[ReplayCheckpoint] processed rebuilt QTPFS path searches after load");
 			dumpReplayCheckpointDebugState("after-path-reset");
 
 			if (gameSetup != nullptr && gameSetup->hostDemo) {
