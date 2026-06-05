@@ -21,7 +21,7 @@
 #include "System/TimeProfiler.h"
 #include "System/SafeUtil.h"
 
-CONFIG(bool, Sound).defaultValue(true).description("Enables (OpenAL) or disables sound.");
+CONFIG(bool, Sound).defaultValue(true).headlessValue(false).description("Enables (OpenAL) or disables sound.");
 
 CONFIG(bool, UseEFX     ).defaultValue( true).safemodeValue(false);
 CONFIG(bool, UseSDLAudio).defaultValue( true).safemodeValue(false).headlessValue(0).description("If enabled, OpenAL-soft only renders audio into a SDL buffer and playback is done by the SDL audio layer, i.e. SDL handles the hardware");
@@ -30,12 +30,12 @@ CONFIG(bool, UseSDLAudio).defaultValue( true).safemodeValue(false).headlessValue
 CONFIG(int, MaxSounds).defaultValue(128).headlessValue(1).minimumValue(1).description("Maximum sounds played in parallel.");
 CONFIG(int, PitchAdjust).defaultValue(0).description("Adjusts sound pitch proportional to [if set to 1, the square root of] game speed. Set to 2 for linear scaling.");
 
-CONFIG(int, snd_volmaster).defaultValue(60).minimumValue(0).maximumValue(200).description("Master sound volume.");
+CONFIG(int, snd_volmaster).defaultValue(60).headlessValue(0).minimumValue(0).maximumValue(200).description("Master sound volume.");
 CONFIG(int, snd_volgeneral).defaultValue(100).minimumValue(0).maximumValue(200).description("Volume for \"general\" sound channel.");
 CONFIG(int, snd_volunitreply).defaultValue(100).minimumValue(0).maximumValue(200).description("Volume for \"unit reply\" sound channel.");
 CONFIG(int, snd_volbattle).defaultValue(100).minimumValue(0).maximumValue(200).description("Volume for \"battle\" sound channel.");
 CONFIG(int, snd_volui).defaultValue(100).minimumValue(0).maximumValue(200).description("Volume for \"ui\" sound channel.");
-CONFIG(int, snd_volmusic).defaultValue(100).minimumValue(0).maximumValue(200).description("Volume for \"music\" sound channel.");
+CONFIG(int, snd_volmusic).defaultValue(100).headlessValue(0).minimumValue(0).maximumValue(200).description("Volume for \"music\" sound channel.");
 CONFIG(float, snd_airAbsorption).defaultValue(0.1f);
 
 CONFIG(std::string, snd_device).defaultValue("").description("Sets the used output device. See \"Available Devices\" section in infolog.txt.");
@@ -150,4 +150,3 @@ bool ISound::LoadSoundDefs(LuaParser* defsParser)
 {
 	return (singleton->LoadSoundDefsImpl(defsParser));
 }
-
