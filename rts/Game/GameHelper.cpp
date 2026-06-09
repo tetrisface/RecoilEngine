@@ -36,12 +36,17 @@
 #include "Sim/Units/UnitHandler.h"
 #include "Sim/Weapons/WeaponDefHandler.h"
 #include "Sim/Weapons/Weapon.h"
+#include "System/Config/ConfigHandler.h"
+#include "System/Config/ConfigVariable.h"
 #include "System/EventHandler.h"
 #include "System/SpringMath.h"
 #include "System/Sound/ISoundChannels.h"
+#include "System/Sync/SyncChecker.h"
 
 #include "System/Misc/TracyDefs.h"
 
+
+CONFIG(int, ReplayCheckpointDebugTargetQueryUnit).defaultValue(-1).description("Log replay checkpoint target-query diagnostics for this unit id on ReplayCheckpointDebugSignatureFrame; -1 disables it.");
 
 static CGameHelper gGameHelper;
 CGameHelper* helper = &gGameHelper;
@@ -667,6 +672,102 @@ namespace {
 		};
 
 	} // end of namespace Query
+
+	static bool ReplayCheckpointDebugTargetQuery(const CMobileCAI* cai)
+	{
+		if (gs == nullptr || configHandler == nullptr || cai == nullptr || cai->owner == nullptr)
+			return false;
+
+		const int debugFrame = configHandler->GetInt("ReplayCheckpointDebugSignatureFrame");
+		if (debugFrame < 0 || gs->frameNum != debugFrame)
+			return false;
+
+		const int debugUnit = configHandler->GetInt("ReplayCheckpointDebugTargetQueryUnit");
+		return (debugUnit >= 0 && cai->owner->id == debugUnit);
+	}
+
+	static CUnit* ReplayCheckpointDebugGetClosestValidTarget(const float3& pos, float searchRadius, int searchAllyteam, const CMobileCAI* cai)
+	{
+		Query::ClosestUnit query(pos, searchRadius);
+		Filter::Enemy_InLos_ValidTarget filter(searchAllyteam, cai);
+
+		QuadFieldQuery qfQuery;
+		quadField.GetQuads(qfQuery, query.pos, query.radius);
+		const int tempNum = gs->GetTempNum();
+
+		LOG("[ReplayCheckpoint][target-query] begin frame=%d owner=%d sync=%08x temp=%d pos=<%.8g,%.8g,%.8g> radius=%.8g quads=%u allyTeams=%d",
+			gs->frameNum,
+			cai->owner->id,
+			CSyncChecker::GetChecksum(),
+			tempNum,
+			pos.x, pos.y, pos.z,
+			searchRadius,
+			unsigned(qfQuery.quads->size()),
+			teamHandler.ActiveAllyTeams()
+		);
+
+		for (int t = 0; t < teamHandler.ActiveAllyTeams(); ++t) {
+			const bool teamAccepted = filter.Team(t);
+
+			if (!teamAccepted)
+				continue;
+
+			for (const int qi: *qfQuery.quads) {
+				const auto& allyTeamUnits = quadField.GetQuad(qi).teamUnits[t];
+
+				for (CUnit* u: allyTeamUnits) {
+					const unsigned int beforeSync = CSyncChecker::GetChecksum();
+					const int oldTempNum = u->tempNum;
+
+					if (u->tempNum == tempNum) {
+						LOG("[ReplayCheckpoint][target-query] skip-temp frame=%d owner=%d q=%d team=%d unit=%d sync=%08x temp=%d oldTemp=%d",
+							gs->frameNum, cai->owner->id, qi, t, u->id, beforeSync, tempNum, oldTempNum);
+						continue;
+					}
+
+					u->tempNum = tempNum;
+					const unsigned int afterMarkSync = CSyncChecker::GetChecksum();
+
+					const bool unitAccepted = filter.Unit(u);
+					const unsigned int afterFilterSync = CSyncChecker::GetChecksum();
+
+					if (unitAccepted)
+						query.AddUnit(u);
+
+					LOG("[ReplayCheckpoint][target-query] candidate frame=%d owner=%d q=%d team=%d unit=%d sync=%08x/%08x/%08x temp=%d oldTemp=%d los=%u neutral=%u cat=%u accepted=%u closest=%d mid=<%.8g,%.8g,%.8g>",
+						gs->frameNum,
+						cai->owner->id,
+						qi,
+						t,
+						u->id,
+						beforeSync,
+						afterMarkSync,
+						afterFilterSync,
+						tempNum,
+						oldTempNum,
+						u->losStatus[searchAllyteam],
+						u->IsNeutral() ? 1u : 0u,
+						u->category,
+						unitAccepted ? 1u : 0u,
+						(query.GetClosestUnit() != nullptr) ? query.GetClosestUnit()->id : -1,
+						static_cast<double>(static_cast<float>(u->midPos.x)),
+						static_cast<double>(static_cast<float>(u->midPos.y)),
+						static_cast<double>(static_cast<float>(u->midPos.z))
+					);
+				}
+			}
+		}
+
+		CUnit* closestUnit = query.GetClosestUnit();
+		LOG("[ReplayCheckpoint][target-query] end frame=%d owner=%d sync=%08x closest=%d",
+			gs->frameNum,
+			cai->owner->id,
+			CSyncChecker::GetChecksum(),
+			(closestUnit != nullptr) ? closestUnit->id : -1
+		);
+
+		return closestUnit;
+	}
 } // end of namespace
 
 
@@ -823,6 +924,10 @@ CUnit* CGameHelper::GetClosestEnemyUnit(const CUnit* excludeUnit, const float3& 
 CUnit* CGameHelper::GetClosestValidTarget(const float3& pos, float searchRadius, int searchAllyteam, const CMobileCAI* cai)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
+
+	if (ReplayCheckpointDebugTargetQuery(cai))
+		return ReplayCheckpointDebugGetClosestValidTarget(pos, searchRadius, searchAllyteam, cai);
+
 	Query::ClosestUnit q(pos, searchRadius);
 	QueryUnits(Filter::Enemy_InLos_ValidTarget(searchAllyteam, cai), q);
 	return q.GetClosestUnit();

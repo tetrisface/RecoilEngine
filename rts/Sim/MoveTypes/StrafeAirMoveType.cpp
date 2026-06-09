@@ -15,8 +15,11 @@
 #include "Sim/Units/UnitDef.h"
 #include "Sim/Units/CommandAI/CommandAI.h"
 #include "Sim/Weapons/Weapon.h"
+#include "System/Config/ConfigHandler.h"
+#include "System/Log/ILog.h"
 #include "System/SpringMath.h"
 #include "System/SpringHash.h"
+#include "System/Sync/SyncChecker.h"
 
 #include "System/Misc/TracyDefs.h"
 
@@ -94,6 +97,16 @@ static const unsigned int FLOAT_MEMBER_HASHES[] = {
 
 extern AAirMoveType::GetGroundHeightFunc amtGetGroundHeightFuncs[6];
 extern AAirMoveType::EmitCrashTrailFunc amtEmitCrashTrailFuncs[2];
+
+static bool ReplayCheckpointDebugStrafeAirMoveFrame(const CUnit* owner)
+{
+	return (
+		configHandler != nullptr &&
+		gs != nullptr &&
+		owner != nullptr &&
+		gs->frameNum == configHandler->GetInt("ReplayCheckpointDebugSignatureFrame")
+	);
+}
 
 
 
@@ -884,6 +897,42 @@ bool CStrafeAirMoveType::UpdateFlying(float wantedHeight, float wantedThrottle)
 	const float3  prvCtrlAngles[2] = {{lastRudderPos[0], lastElevatorPos[0], lastAileronPos[0]}, {lastRudderPos[1], lastElevatorPos[1], lastAileronPos[1]}};
 	const float3& curCtrlAngles    = GetControlSurfaceAngles(owner, lastCollidee,  pos, spd,  rightdir, updir, frontdir, goalDir2D,  yprInputLocks, maxBodyAngles, maxCtrlAngles, prvCtrlAngles,  groundHeight, wantedHeight,  goalDotRight, goalDotFront,  false && collisionState == COLLISION_DIRECT, false);
 
+	if (ReplayCheckpointDebugStrafeAirMoveFrame(owner)) {
+		const float elevatorPosHeight = CGround::GetHeightAboveWater(pos.x + spd.x * 40.0f, pos.z + spd.z * 40.0f);
+		const float elevatorMaxSpeed = std::max(0.001f, maxElevator * 20.0f * spd.w * spd.w);
+		const float elevatorDifHeight = std::max(groundHeight, elevatorPosHeight) + wantedHeight - pos.y - (frontdir.y * spd.w * 20.0f);
+
+		LOG("[ReplayCheckpoint][strafe-flying-input] frame=%d unit=%d sync=%08x pos=<%.9g,%.9g,%.9g> speed=<%.9g,%.9g,%.9g,%.9g> goal=<%.9g,%.9g,%.9g> goalVec=<%.9g,%.9g,%.9g> goalDist2D=%.9g goalDir2D=<%.9g,%.9g,%.9g> rightDir2D=<%.9g,%.9g,%.9g> allowUnlock=%u forceUnlock=%u useSmooth=%u groundHeight=%.9g elevatorPosHeight=%.9g elevatorMaxSpeed=%.9g elevatorDifHeight=%.9g nearGoal=%.9g turnFlip=%.9g goalDotFront=%.9g goalDotRight=%.9g locks=<%.9g,%.9g,%.9g> prev0=<%.9g,%.9g,%.9g> prev1=<%.9g,%.9g,%.9g> ctrl=<%.9g,%.9g,%.9g> wantedHeight=%.9g wantedThrottle=%.9g",
+			gs->frameNum,
+			owner->id,
+			CSyncChecker::GetChecksum(),
+			pos.x, pos.y, pos.z,
+			spd.x, spd.y, spd.z, spd.w,
+			goalPos.x, goalPos.y, goalPos.z,
+			goalVec.x, goalVec.y, goalVec.z,
+			goalDist2D,
+			goalDir2D.x, goalDir2D.y, goalDir2D.z,
+			rightDir2D.x, rightDir2D.y, rightDir2D.z,
+			allowUnlockYawRoll? 1u: 0u,
+			forceUnlockYawRoll? 1u: 0u,
+			UseSmoothMesh()? 1u: 0u,
+			groundHeight,
+			elevatorPosHeight,
+			elevatorMaxSpeed,
+			elevatorDifHeight,
+			nearGoal,
+			turnFlip,
+			goalDotFront,
+			goalDotRight,
+			yprInputLocks.x, yprInputLocks.y, yprInputLocks.z,
+			prvCtrlAngles[0].x, prvCtrlAngles[0].y, prvCtrlAngles[0].z,
+			prvCtrlAngles[1].x, prvCtrlAngles[1].y, prvCtrlAngles[1].z,
+			curCtrlAngles.x, curCtrlAngles.y, curCtrlAngles.z,
+			wantedHeight,
+			wantedThrottle
+		);
+	}
+
 	UpdateAirPhysics({curCtrlAngles, wantedThrottle}, owner->frontdir);
 
 	return (allowUnlockYawRoll || forceUnlockYawRoll);
@@ -1445,4 +1494,3 @@ bool CStrafeAirMoveType::SetMemberValue(unsigned int memberHash, void* memberVal
 
 	return false;
 }
-

@@ -174,6 +174,31 @@ static uint32_t ReplayCheckpointProjectileHashUInt(uint32_t hash, uint32_t value
 	return spring::LiteHash(&value, sizeof(value), hash);
 }
 
+size_t CProjectileHandler::GetReplayCheckpointFreeKeyCount(bool synced) const
+{
+	return projectiles[synced].GetFreeKeys().size();
+}
+
+uint32_t CProjectileHandler::GetReplayCheckpointFreeKeyHash(bool synced) const
+{
+	uint32_t hash = 0x6d2b79f5u;
+
+	for (const int key: projectiles[synced].GetFreeKeys())
+		hash = ReplayCheckpointProjectileHashInt(hash, key);
+
+	return hash;
+}
+
+uint32_t CProjectileHandler::GetReplayCheckpointActiveKeyHash(bool synced) const
+{
+	uint32_t hash = 0xf00d1234u;
+
+	for (const int key: projectiles[synced].GetKeys())
+		hash = ReplayCheckpointProjectileHashInt(hash, key);
+
+	return hash;
+}
+
 static uint32_t ReplayCheckpointProjectileHashFloat(uint32_t hash, float value)
 {
 	uint32_t bits;
@@ -238,6 +263,14 @@ static void ReplayCheckpointLogProjectileEvent(const char* label, const CProject
 		(wp != nullptr) ? wp->HasScheduledBounce() : false);
 }
 
+static constexpr int REPLAY_CHECKPOINT_DEBUG_PROJECTILE_COLLISION_ID = 13147;
+static constexpr int REPLAY_CHECKPOINT_DEBUG_PROJECTILE_COLLISION_UNIT_ID = 15919;
+
+static bool ReplayCheckpointShouldLogProjectileCollisionTrace(const CProjectile* p)
+{
+	return (ReplayCheckpointDebugProjectileFrame() && p != nullptr && p->synced && p->id == REPLAY_CHECKPOINT_DEBUG_PROJECTILE_COLLISION_ID);
+}
+
 static void ReplayCheckpointLogProjectileSignature(const char* label)
 {
 	if (!ReplayCheckpointDebugProjectileFrame())
@@ -274,11 +307,14 @@ static void ReplayCheckpointLogProjectileSignature(const char* label)
 		++count;
 	}
 
-	LOG("[ReplayCheckpoint][proj-sig] %s frame=%d syncedProjectiles=%u hash=%08x",
+	LOG("[ReplayCheckpoint][proj-sig] %s frame=%d syncedProjectiles=%u hash=%08x activeKeyHash=%08x freeKeys=%u freeKeyHash=%08x",
 		label,
 		gs->frameNum,
 		count,
-		hash);
+		hash,
+		projectileHandler.GetReplayCheckpointActiveKeyHash(true),
+		static_cast<unsigned int>(projectileHandler.GetReplayCheckpointFreeKeyCount(true)),
+		projectileHandler.GetReplayCheckpointFreeKeyHash(true));
 }
 
 template<bool synced>
@@ -501,6 +537,9 @@ void CProjectileHandler::AddProjectile(CProjectile* p)
 	assert(p->id < 0);
 	assert(p->createMe);
 
+	const size_t syncedFreeKeyCountBefore = p->synced ? GetReplayCheckpointFreeKeyCount(true) : 0;
+	const uint32_t syncedFreeKeyHashBefore = p->synced ? GetReplayCheckpointFreeKeyHash(true) : 0u;
+
 	if (p->synced)
 		p->id = static_cast<int>(projectiles[true ].Add(p, rngFuncs[true]));
 	else
@@ -509,6 +548,19 @@ void CProjectileHandler::AddProjectile(CProjectile* p)
 	if (p->synced) {
 		ASSERT_SYNCED(freeIDs.size());
 		ASSERT_SYNCED(p->id);
+
+		if (ReplayCheckpointDebugProjectileFrame()) {
+			LOG("[ReplayCheckpoint][proj-add] frame=%d id=%d freeBefore=%u freeHashBefore=%08x freeAfter=%u freeHashAfter=%08x activeKeyHash=%08x rng=%llu",
+				gs->frameNum,
+				p->id,
+				static_cast<unsigned int>(syncedFreeKeyCountBefore),
+				syncedFreeKeyHashBefore,
+				static_cast<unsigned int>(GetReplayCheckpointFreeKeyCount(true)),
+				GetReplayCheckpointFreeKeyHash(true),
+				GetReplayCheckpointActiveKeyHash(true),
+				static_cast<unsigned long long>(gsRNG.GetGenState()));
+			ReplayCheckpointLogProjectileEvent("add", p);
+		}
 	}
 
 	CreateProjectile(p);
@@ -571,20 +623,101 @@ void CProjectileHandler::CheckUnitCollisions(
 		return;
 
 	CollisionQuery cq;
+	const bool replayCheckpointTrace = ReplayCheckpointShouldLogProjectileCollisionTrace(p);
+	const auto* wp = replayCheckpointTrace ? dynamic_cast<const CWeaponProjectile*>(p) : nullptr;
 
-	for (CUnit* unit: tempUnits) {
+	for (size_t unitIndex = 0; unitIndex < tempUnits.size(); ++unitIndex) {
+		CUnit* unit = tempUnits[unitIndex];
 		assert(unit != nullptr);
 
+		const bool owner = (unit == p->owner());
+		const bool collidable = unit->HasCollidableStateBit(CSolidObject::CSTATE_BIT_PROJECTILES);
+		bool flagsOk = false;
+		bool hit = false;
+
 		// if this unit fired this projectile, always ignore
-		if (unit == p->owner())
+		if (owner) {
+			if (replayCheckpointTrace) {
+				LOG("[ReplayCheckpoint][proj-collision] candidate frame=%d projectile=%d index=%u unit=%d owner=1 collidable=%d flags=0 hit=0 target=%d pos=<%f,%f,%f> p0=<%f,%f,%f> p1=<%f,%f,%f>",
+					gs->frameNum,
+					p->id,
+					static_cast<unsigned int>(unitIndex),
+					unit->id,
+					static_cast<int>(collidable),
+					(wp != nullptr && wp->GetTargetObject() != nullptr) ? wp->GetTargetObject()->id : -1,
+					unit->pos.x, unit->pos.y, unit->pos.z,
+					ppos0.x, ppos0.y, ppos0.z,
+					ppos1.x, ppos1.y, ppos1.z
+				);
+			}
 			continue;
-		if (!unit->HasCollidableStateBit(CSolidObject::CSTATE_BIT_PROJECTILES))
-			continue;
+		}
 
-		if (!CheckProjectileCollisionFlags(p, unit))
+		if (!collidable) {
+			if (replayCheckpointTrace) {
+				LOG("[ReplayCheckpoint][proj-collision] candidate frame=%d projectile=%d index=%u unit=%d owner=0 collidable=0 flags=0 hit=0 target=%d pos=<%f,%f,%f> p0=<%f,%f,%f> p1=<%f,%f,%f>",
+					gs->frameNum,
+					p->id,
+					static_cast<unsigned int>(unitIndex),
+					unit->id,
+					(wp != nullptr && wp->GetTargetObject() != nullptr) ? wp->GetTargetObject()->id : -1,
+					unit->pos.x, unit->pos.y, unit->pos.z,
+					ppos0.x, ppos0.y, ppos0.z,
+					ppos1.x, ppos1.y, ppos1.z
+				);
+			}
 			continue;
+		}
 
-		if (CCollisionHandler::DetectHit(unit, unit->GetTransformMatrix(true), ppos0, ppos1, &cq)) {
+		flagsOk = CheckProjectileCollisionFlags(p, unit);
+		if (!flagsOk) {
+			if (replayCheckpointTrace) {
+				LOG("[ReplayCheckpoint][proj-collision] candidate frame=%d projectile=%d index=%u unit=%d owner=0 collidable=1 flags=0 hit=0 target=%d pos=<%f,%f,%f> p0=<%f,%f,%f> p1=<%f,%f,%f>",
+					gs->frameNum,
+					p->id,
+					static_cast<unsigned int>(unitIndex),
+					unit->id,
+					(wp != nullptr && wp->GetTargetObject() != nullptr) ? wp->GetTargetObject()->id : -1,
+					unit->pos.x, unit->pos.y, unit->pos.z,
+					ppos0.x, ppos0.y, ppos0.z,
+					ppos1.x, ppos1.y, ppos1.z
+				);
+			}
+			continue;
+		}
+
+		hit = CCollisionHandler::DetectHit(unit, unit->GetTransformMatrix(true), ppos0, ppos1, &cq);
+		if (replayCheckpointTrace || unit->id == REPLAY_CHECKPOINT_DEBUG_PROJECTILE_COLLISION_UNIT_ID) {
+			LOG("[ReplayCheckpoint][proj-collision] candidate frame=%d projectile=%d index=%u unit=%d owner=0 collidable=1 flags=1 hit=%d target=%d pos=<%f,%f,%f> p0=<%f,%f,%f> p1=<%f,%f,%f>%s",
+				gs->frameNum,
+				p->id,
+				static_cast<unsigned int>(unitIndex),
+				unit->id,
+				static_cast<int>(hit),
+				(wp != nullptr && wp->GetTargetObject() != nullptr) ? wp->GetTargetObject()->id : -1,
+				unit->pos.x, unit->pos.y, unit->pos.z,
+				ppos0.x, ppos0.y, ppos0.z,
+				ppos1.x, ppos1.y, ppos1.z,
+				(hit ? "" : "")
+			);
+		}
+
+		if (hit) {
+			if (replayCheckpointTrace || unit->id == REPLAY_CHECKPOINT_DEBUG_PROJECTILE_COLLISION_UNIT_ID) {
+				const float3 hitPos = cq.GetHitPos();
+				LOG("[ReplayCheckpoint][proj-collision] hit frame=%d projectile=%d index=%u unit=%d inside=%d ingress=%d egress=%d hitPiece=%d hitPos=<%f,%f,%f>",
+					gs->frameNum,
+					p->id,
+					static_cast<unsigned int>(unitIndex),
+					unit->id,
+					static_cast<int>(cq.InsideHit()),
+					static_cast<int>(cq.IngressHit()),
+					static_cast<int>(cq.EgressHit()),
+					static_cast<int>(cq.GetHitPiece() != nullptr),
+					hitPos.x, hitPos.y, hitPos.z
+				);
+			}
+
 			if (cq.GetHitPiece() != nullptr)
 				unit->SetLastHitPiece(cq.GetHitPiece(), gs->frameNum, p->synced);
 

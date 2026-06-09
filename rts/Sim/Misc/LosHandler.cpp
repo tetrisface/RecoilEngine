@@ -814,8 +814,6 @@ void CLosHandler::ResetLiveMapsForLoad()
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 
-	const ReplayCheckpointLosMapSnapshot savedMaps = CaptureReplayCheckpointLosMaps(losTypes);
-
 	for (ILosType* lt: losTypes) {
 		lt->Kill();
 		lt->Init(lt->mipLevel, lt->type);
@@ -826,7 +824,6 @@ void CLosHandler::ResetLiveMapsForLoad()
 	}
 
 	Update();
-	RestoreReplayCheckpointLosMaps(savedMaps, losTypes);
 
 	LOG("[ReplayCheckpoint] reset LOS maps for load from %u active units",
 		static_cast<unsigned int>(unitHandler.GetActiveUnits().size())

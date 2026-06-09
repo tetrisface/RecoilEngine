@@ -201,6 +201,15 @@ namespace QTPFS {
 			checkPointInBounds(boundingBoxMaxs);
 		}
 
+		void RestoreBoundingBoxState(const float3& mins, const float3& maxs, bool overrideState) {
+			boundingBoxMins = mins;
+			boundingBoxMaxs = maxs;
+			boundingBoxOverride = overrideState;
+
+			checkPointInBounds(boundingBoxMins);
+			checkPointInBounds(boundingBoxMaxs);
+		}
+
 		bool IsBoundingBoxOverriden() const { return boundingBoxOverride; }
 
 		// // This version is only safe if decltype(points)::value_type == float4
@@ -287,6 +296,7 @@ namespace QTPFS {
 		const CSolidObject* GetOwner() const { return owner; }
 
 		unsigned int NumPoints() const { return (points.size()); }
+		unsigned int NumNodes() const { return (nodes.size()); }
 		void AllocPoints(unsigned int n) {
 			points.clear();
 			points.resize(n);
@@ -425,4 +435,3 @@ namespace QTPFS {
 }
 
 #endif
-

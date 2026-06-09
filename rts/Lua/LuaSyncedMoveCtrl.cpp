@@ -14,13 +14,66 @@
 #include "Sim/MoveTypes/AAirMoveType.h"
 #include "Sim/MoveTypes/StrafeAirMoveType.h"
 #include "Sim/MoveTypes/HoverAirMoveType.h"
+#include "Sim/Misc/GlobalSynced.h"
 #include "Sim/Units/Unit.h"
 #include "Sim/Units/UnitHandler.h"
+#include "System/Config/ConfigHandler.h"
 #include "System/SpringMath.h"
 #include "System/Log/ILog.h"
 #include "System/SpringHash.h"
 
 #include <cctype>
+
+
+static bool ReplayCheckpointDebugLuaMoveCtrlFrame()
+{
+	return (gs != nullptr && configHandler != nullptr && gs->frameNum == configHandler->GetInt("ReplayCheckpointDebugSignatureFrame"));
+}
+
+static void LogReplayCheckpointLuaMoveCtrlVector(const char* op, const CScriptMoveType* moveType, const float3& value)
+{
+	if (!ReplayCheckpointDebugLuaMoveCtrlFrame())
+		return;
+
+	const CUnit* unit = (moveType != nullptr) ? moveType->owner : nullptr;
+	LOG("[ReplayCheckpoint][lua-movectrl] op=%s frame=%d unit=%d team=%d value=<%.8g,%.8g,%.8g>",
+		op,
+		gs->frameNum,
+		(unit != nullptr) ? unit->id : -1,
+		(unit != nullptr) ? unit->team : -1,
+		value.x, value.y, value.z
+	);
+}
+
+static void LogReplayCheckpointLuaMoveCtrlPhysics(const CScriptMoveType* moveType, const float3& pos, const float3& vel, const float3& rot)
+{
+	if (!ReplayCheckpointDebugLuaMoveCtrlFrame())
+		return;
+
+	const CUnit* unit = (moveType != nullptr) ? moveType->owner : nullptr;
+	LOG("[ReplayCheckpoint][lua-movectrl] op=SetPhysics frame=%d unit=%d team=%d pos=<%.8g,%.8g,%.8g> vel=<%.8g,%.8g,%.8g> rot=<%.8g,%.8g,%.8g>",
+		gs->frameNum,
+		(unit != nullptr) ? unit->id : -1,
+		(unit != nullptr) ? unit->team : -1,
+		pos.x, pos.y, pos.z,
+		vel.x, vel.y, vel.z,
+		rot.x, rot.y, rot.z
+	);
+}
+
+static void LogReplayCheckpointLuaMoveCtrlHeading(const CScriptMoveType* moveType, short heading)
+{
+	if (!ReplayCheckpointDebugLuaMoveCtrlFrame())
+		return;
+
+	const CUnit* unit = (moveType != nullptr) ? moveType->owner : nullptr;
+	LOG("[ReplayCheckpoint][lua-movectrl] op=SetHeading frame=%d unit=%d team=%d heading=%d",
+		gs->frameNum,
+		(unit != nullptr) ? unit->id : -1,
+		(unit != nullptr) ? unit->team : -1,
+		static_cast<int>(heading)
+	);
+}
 
 
 /******************************************************************************
@@ -317,6 +370,7 @@ int LuaSyncedMoveCtrl::SetPhysics(lua_State* L)
 	const float3 pos(luaL_checkfloat(L, 2), luaL_checkfloat(L, 3), luaL_checkfloat(L,  4));
 	const float3 vel(luaL_checkfloat(L, 5), luaL_checkfloat(L, 6), luaL_checkfloat(L,  7));
 	const float3 rot(luaL_checkfloat(L, 8), luaL_checkfloat(L, 9), luaL_checkfloat(L, 10));
+	LogReplayCheckpointLuaMoveCtrlPhysics(moveType, pos, vel, rot);
 	ASSERT_SYNCED(pos);
 	ASSERT_SYNCED(vel);
 	ASSERT_SYNCED(rot);
@@ -342,6 +396,7 @@ int LuaSyncedMoveCtrl::SetPosition(lua_State* L)
 	const float3 pos(luaL_checkfloat(L, 2),
 	                 luaL_checkfloat(L, 3),
 	                 luaL_checkfloat(L, 4));
+	LogReplayCheckpointLuaMoveCtrlVector("SetPosition", moveType, pos);
 	ASSERT_SYNCED(pos);
 	moveType->SetPosition(pos);
 	return 0;
@@ -365,6 +420,7 @@ int LuaSyncedMoveCtrl::SetVelocity(lua_State* L)
 	const float3 vel(luaL_checkfloat(L, 2),
 	                 luaL_checkfloat(L, 3),
 	                 luaL_checkfloat(L, 4));
+	LogReplayCheckpointLuaMoveCtrlVector("SetVelocity", moveType, vel);
 	ASSERT_SYNCED(vel);
 	moveType->SetVelocity(vel);
 	return 0;
@@ -388,6 +444,7 @@ int LuaSyncedMoveCtrl::SetRelativeVelocity(lua_State* L)
 	const float3 relVel(luaL_checkfloat(L, 2),
 	                    luaL_checkfloat(L, 3),
 	                    luaL_checkfloat(L, 4));
+	LogReplayCheckpointLuaMoveCtrlVector("SetRelativeVelocity", moveType, relVel);
 	ASSERT_SYNCED(relVel);
 	moveType->SetRelativeVelocity(relVel);
 	return 0;
@@ -411,6 +468,7 @@ int LuaSyncedMoveCtrl::SetRotation(lua_State* L)
 	const float3 rot(luaL_checkfloat(L, 2),
 	                 luaL_checkfloat(L, 3),
 	                 luaL_checkfloat(L, 4));
+	LogReplayCheckpointLuaMoveCtrlVector("SetRotation", moveType, rot);
 	ASSERT_SYNCED(rot);
 	moveType->SetRotation(rot);
 	return 0;
@@ -445,6 +503,7 @@ int LuaSyncedMoveCtrl::SetRotationVelocity(lua_State* L)
 	const float3 rotVel(luaL_checkfloat(L, 2),
 	                    luaL_checkfloat(L, 3),
 	                    luaL_checkfloat(L, 4));
+	LogReplayCheckpointLuaMoveCtrlVector("SetRotationVelocity", moveType, rotVel);
 	ASSERT_SYNCED(rotVel);
 	moveType->SetRotationVelocity(rotVel);
 	return 0;
@@ -463,6 +522,7 @@ int LuaSyncedMoveCtrl::SetHeading(lua_State* L)
 		return 0;
 
 	const short heading = (short)luaL_checknumber(L, 2);
+	LogReplayCheckpointLuaMoveCtrlHeading(moveType, heading);
 	ASSERT_SYNCED((short)heading);
 	moveType->SetHeading(heading);
 	return 0;

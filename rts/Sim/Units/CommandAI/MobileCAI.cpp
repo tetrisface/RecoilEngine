@@ -28,6 +28,7 @@
 #include "System/EventHandler.h"
 #include "System/SpringMath.h"
 #include "System/StringUtil.h"
+#include "System/Sync/SyncChecker.h"
 #include <assert.h>
 
 #include "System/Misc/TracyDefs.h"
@@ -60,6 +61,39 @@ static bool ReplayCheckpointDebugMobileCAIFrame()
 {
 	const int debugFrame = configHandler->GetInt("ReplayCheckpointDebugSignatureFrame");
 	return (debugFrame >= 0 && gs != nullptr && gs->frameNum >= (debugFrame - 1) && gs->frameNum <= (debugFrame + 1));
+}
+
+static void LogReplayCheckpointMobileCAIBoundary(
+	const char* label,
+	const CUnit* owner,
+	const Command& c,
+	int inCommand,
+	bool tempOrder,
+	const float3& commandPos1,
+	const float3& commandPos2,
+	const float3& point,
+	int targetID
+) {
+	if (!ReplayCheckpointDebugMobileCAIFrame())
+		return;
+
+	LOG("[ReplayCheckpoint][MobileCAI] %s frame=%d unit=%d sync=%08x rng=%llu cmd=%d tag=%u opts=%u params=%u inCommand=%d temp=%u target=%d p=<%.8g,%.8g,%.8g> cp1=<%.8g,%.8g,%.8g> cp2=<%.8g,%.8g,%.8g>",
+		label,
+		gs->frameNum,
+		(owner != nullptr) ? owner->id : -1,
+		CSyncChecker::GetChecksum(),
+		static_cast<unsigned long long>(gsRNG.GetGenState()),
+		c.GetID(),
+		c.GetTag(),
+		c.GetOpts(),
+		c.GetNumParams(),
+		inCommand,
+		tempOrder ? 1u : 0u,
+		targetID,
+		point.x, point.y, point.z,
+		commandPos1.x, commandPos1.y, commandPos1.z,
+		commandPos2.x, commandPos2.y, commandPos2.z
+	);
 }
 
 
@@ -401,13 +435,17 @@ void CMobileCAI::ExecuteMove(Command& c)
 
 	const float3& cmdPos = c.GetPos(0);
 	const float3& ownPos = owner->pos;
+	LogReplayCheckpointMobileCAIBoundary("move-enter", owner, c, inCommand, tempOrder, commandPos1, commandPos2, cmdPos, -1);
 
 	const float sqGoalDist = cmdPos.SqDistance2D(ownPos);
 
 	// this check is important to process failed orders properly
 	// NB: only works if the *non-extended* goal radius is passed
-	if (!moveType->IsMovingTowards(cmdPos, moveType->GetGoalRadius(0.0f), false))
+	if (!moveType->IsMovingTowards(cmdPos, moveType->GetGoalRadius(0.0f), false)) {
+		LogReplayCheckpointMobileCAIBoundary("move-before-setgoal", owner, c, inCommand, tempOrder, commandPos1, commandPos2, cmdPos, -1);
 		SetGoal(cmdPos, ownPos);
+		LogReplayCheckpointMobileCAIBoundary("move-after-setgoal", owner, c, inCommand, tempOrder, commandPos1, commandPos2, cmdPos, -1);
+	}
 
 	// compare against the moveType's own (possibly extended)
 	// goal radius to determine if we can finish the command
@@ -431,6 +469,7 @@ void CMobileCAI::ExecuteMove(Command& c)
 		return;
 
 	// fallback
+	LogReplayCheckpointMobileCAIBoundary("move-before-fallback-finish", owner, c, inCommand, tempOrder, commandPos1, commandPos2, cmdPos, -1);
 	FinishCommand();
 }
 
@@ -497,6 +536,8 @@ void CMobileCAI::ExecuteFight(Command& c)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 	assert(c.IsInternalOrder() || owner->unitDef->canFight);
+	const float3 initialCmdPos = (c.GetNumParams() >= 3) ? c.GetPos(0) : ZeroVector;
+	LogReplayCheckpointMobileCAIBoundary("fight-enter", owner, c, inCommand, tempOrder, commandPos1, commandPos2, initialCmdPos, -1);
 
 	if (c.GetNumParams() == 1 && !owner->weapons.empty()) {
 		CWeapon* w = owner->weapons.front();
@@ -518,6 +559,7 @@ void CMobileCAI::ExecuteFight(Command& c)
 	if (tempOrder) {
 		inCommand = CMD_FIGHT;
 		tempOrder = false;
+		LogReplayCheckpointMobileCAIBoundary("fight-after-temp-order", owner, c, inCommand, tempOrder, commandPos1, commandPos2, initialCmdPos, -1);
 	}
 	if (c.GetNumParams() < 3) {
 		LOG_L(L_ERROR, "[MobileCAI::%s][f=%d][id=%d][#c.params=%d min=3]", __func__, gs->frameNum, owner->id, c.GetNumParams());
@@ -538,6 +580,7 @@ void CMobileCAI::ExecuteFight(Command& c)
 			commandPos1 = owner->pos;
 		}
 	}
+	LogReplayCheckpointMobileCAIBoundary("fight-after-command-pos1", owner, c, inCommand, tempOrder, commandPos1, commandPos2, c.GetPos(0), -1);
 
 	float3 cmdPos = c.GetPos(0);
 
@@ -545,9 +588,12 @@ void CMobileCAI::ExecuteFight(Command& c)
 		inCommand = CMD_FIGHT;
 		commandPos2 = cmdPos;
 		lastUserGoal = commandPos2;
+		LogReplayCheckpointMobileCAIBoundary("fight-after-start", owner, c, inCommand, tempOrder, commandPos1, commandPos2, cmdPos, -1);
 	}
-	if (c.GetNumParams() >= 6)
+	if (c.GetNumParams() >= 6) {
 		cmdPos = ClosestPointOnLine(commandPos1, commandPos2, owner->pos);
+		LogReplayCheckpointMobileCAIBoundary("fight-after-line-point", owner, c, inCommand, tempOrder, commandPos1, commandPos2, cmdPos, -1);
+	}
 
 	if (owner->unitDef->canAttack && owner->fireState >= FIRESTATE_FIREATWILL && !owner->weapons.empty()) {
 		const float3 curPosOnLine = ClosestPointOnLine(commandPos1, commandPos2, owner->pos);
@@ -556,16 +602,20 @@ void CMobileCAI::ExecuteFight(Command& c)
 		const float searchRadius = owner->maxRange + leashRadius;
 
 		CUnit* enemy = CGameHelper::GetClosestValidTarget(curPosOnLine, searchRadius, owner->allyteam, this);
+		LogReplayCheckpointMobileCAIBoundary("fight-after-target-search", owner, c, inCommand, tempOrder, commandPos1, commandPos2, curPosOnLine, (enemy != nullptr) ? enemy->id : -1);
 
 		if (enemy != nullptr) {
 			PushOrUpdateReturnFight();
+			LogReplayCheckpointMobileCAIBoundary("fight-after-return-fight", owner, c, inCommand, tempOrder, commandPos1, commandPos2, curPosOnLine, enemy->id);
 
 			// make the attack-command inherit <c>'s options
 			// NOTE: see AirCAI::ExecuteFight why we do not set INTERNAL_ORDER
 			commandQue.push_front(Command(CMD_ATTACK, c.GetOpts(), enemy->id));
+			LogReplayCheckpointMobileCAIBoundary("fight-after-push-attack", owner, c, inCommand, tempOrder, commandPos1, commandPos2, curPosOnLine, enemy->id);
 
 			inCommand = CMD_STOP;
 			tempOrder = true;
+			LogReplayCheckpointMobileCAIBoundary("fight-before-recursive-slow", owner, c, inCommand, tempOrder, commandPos1, commandPos2, curPosOnLine, enemy->id);
 
 			if (lastCommandFrame == gs->frameNum)
 				return;
@@ -576,7 +626,9 @@ void CMobileCAI::ExecuteFight(Command& c)
 		}
 	}
 
+	LogReplayCheckpointMobileCAIBoundary("fight-before-execute-move", owner, c, inCommand, tempOrder, commandPos1, commandPos2, cmdPos, -1);
 	ExecuteMove(c);
+	LogReplayCheckpointMobileCAIBoundary("fight-after-execute-move", owner, c, inCommand, tempOrder, commandPos1, commandPos2, cmdPos, -1);
 }
 
 bool CMobileCAI::IsValidTarget(const CUnit* enemy, CWeapon* weapon) const {

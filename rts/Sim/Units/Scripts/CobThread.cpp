@@ -11,6 +11,8 @@
 #include "Sim/Misc/GlobalConstants.h"
 #include "Sim/Misc/GlobalSynced.h"
 
+#include "System/Config/ConfigHandler.h"
+#include "System/Log/ILog.h"
 #include "System/Misc/TracyDefs.h"
 #include "System/SpringHash.h"
 
@@ -218,6 +220,28 @@ const std::string& CCobThread::GetName()
 	return cobFile->scriptNames[callStack[0].functionId];
 }
 
+static constexpr int REPLAY_CHECKPOINT_DEBUG_COB_THREAD_UNIT_ID = 15919;
+
+static bool ReplayCheckpointDebugCobThreadFrame(const CCobInstance* cobInst)
+{
+	return (
+		gs != nullptr &&
+		configHandler != nullptr &&
+		gs->frameNum == configHandler->GetInt("ReplayCheckpointDebugSignatureFrame") &&
+		cobInst != nullptr &&
+		cobInst->GetUnit() != nullptr &&
+		cobInst->GetUnit()->id == REPLAY_CHECKPOINT_DEBUG_COB_THREAD_UNIT_ID
+	);
+}
+
+static const char* ReplayCheckpointCobThreadFunctionName(const CCobFile* cobFile, int functionId)
+{
+	if (cobFile == nullptr || functionId < 0 || size_t(functionId) >= cobFile->scriptNames.size())
+		return "<invalid>";
+
+	return cobFile->scriptNames[functionId].c_str();
+}
+
 
 int CCobThread::CheckStack(unsigned int size, bool warn)
 {
@@ -404,6 +428,30 @@ bool CCobThread::Tick()
 				t.SetID(cobEngine->GenThreadID());
 				t.InitStack(r2, this);
 				t.Start(r1, signalMask, {{0}}, true);
+
+				if (ReplayCheckpointDebugCobThreadFrame(cobInst)) {
+					const int parentFunctionId = callStack.empty() ? -1 : LocalFunctionID();
+					LOG("[ReplayCheckpoint][cob-start] frame=%d time=%d unit=%d parent=%d parentFunc=%d parentName=%s parentPc=%d child=%d childFunc=%d childName=%s args=%d sig=%d parentData=%u|%08x childData=%u|%08x childCall=%u|%08x",
+						gs->frameNum,
+						(cobEngine != nullptr) ? cobEngine->GetCurrTime() : -1,
+						cobInst->GetUnit()->id,
+						id,
+						parentFunctionId,
+						ReplayCheckpointCobThreadFunctionName(cobFile, parentFunctionId),
+						pc,
+						t.GetID(),
+						r1,
+						ReplayCheckpointCobThreadFunctionName(cobFile, r1),
+						r2,
+						signalMask,
+						static_cast<unsigned int>(GetDataStackSize()),
+						GetDataStackChecksum(),
+						static_cast<unsigned int>(t.GetDataStackSize()),
+						t.GetDataStackChecksum(),
+						static_cast<unsigned int>(t.GetCallStackSize()),
+						t.GetCallStackChecksum()
+					);
+				}
 
 				// calling AddThread directly might move <this>, defer it
 				cobEngine->QueueAddThread(std::move(t));

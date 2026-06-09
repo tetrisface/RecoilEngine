@@ -12,12 +12,14 @@
 #include "NodeLayer.h"
 #include "Sim/Misc/CollisionHandler.h"
 #include "Sim/Misc/GlobalConstants.h"
+#include "Sim/Misc/GlobalSynced.h"
 #include "Sim/Misc/ModInfo.h"
 #include "System/Log/ILog.h"
 #include "Game/SelectedUnitsHandler.h"
 #include "Sim/Objects/SolidObject.h"
 
 #include "Components/PathSpeedModInfo.h"
+#include "System/Config/ConfigHandler.h"
 #include "System/Ecs/Utils/SystemGlobalUtils.h"
 
 #include "Map/ReadMap.h"
@@ -31,6 +33,22 @@
 #include "System/float3.h"
 
 #include "System/Misc/TracyDefs.h"
+
+namespace {
+	bool ReplayCheckpointDebugPathSearchFrame()
+	{
+		return (
+			gs != nullptr &&
+			configHandler != nullptr &&
+			gs->frameNum == configHandler->GetInt("ReplayCheckpointDebugSignatureFrame")
+		);
+	}
+
+	int ReplayCheckpointDebugPathOwnerID(const CSolidObject* owner)
+	{
+		return (owner != nullptr) ? owner->id : -1;
+	}
+}
 
 int QTPFS::PathSearch::MAP_MAX_NODES_SEARCHED;
 float QTPFS::PathSearch::MAP_RELATIVE_MAX_NODES_SEARCHED;
@@ -318,6 +336,25 @@ void QTPFS::PathSearch::InitializeThread(SearchThreadData* threadData) {
 
 	curSearchNode = nullptr;
 	nextSearchNode = nullptr;
+
+	if (ReplayCheckpointDebugPathSearchFrame()) {
+		LOG("[ReplayCheckpoint][qtpfs-search] init-thread frame=%d path=%u owner=%d type=%d raw=%u allowPartial=%u doRepair=%u tryRepair=%u badGoal=%u srcNode=%u tgtNode=%u fwdSrc=<%.8g,%.8g,%.8g> fwdTgt=<%.8g,%.8g,%.8g> goal=<%.8g,%.8g,%.8g>",
+			gs->frameNum,
+			searchID,
+			ReplayCheckpointDebugPathOwnerID(pathOwner),
+			pathType,
+			rawPathCheck ? 1u : 0u,
+			allowPartialSearch ? 1u : 0u,
+			doPathRepair ? 1u : 0u,
+			tryPathRepair ? 1u : 0u,
+			badGoal ? 1u : 0u,
+			fwd.srcSearchNode != nullptr ? fwd.srcSearchNode->GetIndex() : 0u,
+			fwd.tgtSearchNode != nullptr ? fwd.tgtSearchNode->GetIndex() : 0u,
+			fwd.srcPoint.x, fwd.srcPoint.y, fwd.srcPoint.z,
+			fwd.tgtPoint.x, fwd.tgtPoint.y, fwd.tgtPoint.z,
+			goalPos.x, goalPos.y, goalPos.z
+		);
+	}
 }
 
 // #pragma GCC pop_options
@@ -434,6 +471,19 @@ void QTPFS::PathSearch::LoadPartialPath(IPath* path) {
 		});
 	}
 	expectIncompletePartialSearch = (badNodeCount > 0);
+
+	if (ReplayCheckpointDebugPathSearchFrame()) {
+		LOG("[ReplayCheckpoint][qtpfs-search] load-partial frame=%d path=%u owner=%d sourcePath=%u sourcePoints=%u sourceNodes=%u badNodes=%u expectIncomplete=%u",
+			gs->frameNum,
+			searchID,
+			ReplayCheckpointDebugPathOwnerID(pathOwner),
+			path != nullptr ? path->GetID() : 0u,
+			path != nullptr ? path->NumPoints() : 0u,
+			path != nullptr ? path->NumNodes() : 0u,
+			badNodeCount,
+			expectIncompletePartialSearch ? 1u : 0u
+		);
+	}
 }
 
 void QTPFS::PathSearch::LoadRepairPath() {
@@ -527,11 +577,41 @@ void QTPFS::PathSearch::LoadRepairPath() {
 bool QTPFS::PathSearch::Execute(unsigned int searchStateOffset) {
 	RECOIL_DETAILED_TRACY_ZONE;
 
-	if (rawPathCheck)
-		return ExecuteRawSearch();
-
 	auto& fwd = directionalSearchData[SearchThreadData::SEARCH_FORWARD];
 	auto& bwd = directionalSearchData[SearchThreadData::SEARCH_BACKWARD];
+
+	if (ReplayCheckpointDebugPathSearchFrame()) {
+		LOG("[ReplayCheckpoint][qtpfs-search] execute-begin frame=%d path=%u owner=%d raw=%u allowPartial=%u doPartial=%u doRepair=%u stateOffset=%u",
+			gs->frameNum,
+			searchID,
+			ReplayCheckpointDebugPathOwnerID(pathOwner),
+			rawPathCheck ? 1u : 0u,
+			allowPartialSearch ? 1u : 0u,
+			doPartialSearch ? 1u : 0u,
+			doPathRepair ? 1u : 0u,
+			searchStateOffset
+		);
+	}
+
+	if (rawPathCheck) {
+		const bool rawResult = ExecuteRawSearch();
+		if (ReplayCheckpointDebugPathSearchFrame()) {
+			LOG("[ReplayCheckpoint][qtpfs-search] execute-end frame=%d path=%u raw=1 result=%u full=%u part=%u waiting=%u rejectPartial=%u fwdSearched=%u bwdSearched=%u useFwdOnly=%u fwdTgt=<%.8g,%.8g,%.8g>",
+				gs->frameNum,
+				searchID,
+				rawResult ? 1u : 0u,
+				haveFullPath ? 1u : 0u,
+				havePartPath ? 1u : 0u,
+				pathRequestWaiting ? 1u : 0u,
+				rejectPartialSearch ? 1u : 0u,
+				static_cast<unsigned int>(fwdNodesSearched),
+				static_cast<unsigned int>(bwdNodesSearched),
+				useFwdPathOnly ? 1u : 0u,
+				fwd.tgtPoint.x, fwd.tgtPoint.y, fwd.tgtPoint.z
+			);
+		}
+		return rawResult;
+	}
 
 	haveFullPath = (fwd.srcSearchNode == fwd.tgtSearchNode);
 	havePartPath = false;
@@ -548,10 +628,49 @@ bool QTPFS::PathSearch::Execute(unsigned int searchStateOffset) {
 		auto* curNode = nodeLayer->GetPoolNode(bwd.srcSearchNode->GetIndex());
 		InitSearchNodeData(bwd.srcSearchNode, curNode);
 		}
+		if (ReplayCheckpointDebugPathSearchFrame()) {
+			LOG("[ReplayCheckpoint][qtpfs-search] execute-end frame=%d path=%u raw=0 result=1 full=%u part=%u waiting=%u rejectPartial=%u fwdSearched=%u bwdSearched=%u useFwdOnly=%u fwdTgtNode=%u bwdTgtNode=%u fwdTgt=<%.8g,%.8g,%.8g> bwdTgt=<%.8g,%.8g,%.8g>",
+				gs->frameNum,
+				searchID,
+				haveFullPath ? 1u : 0u,
+				havePartPath ? 1u : 0u,
+				pathRequestWaiting ? 1u : 0u,
+				rejectPartialSearch ? 1u : 0u,
+				static_cast<unsigned int>(fwdNodesSearched),
+				static_cast<unsigned int>(bwdNodesSearched),
+				useFwdPathOnly ? 1u : 0u,
+				fwd.tgtSearchNode != nullptr ? fwd.tgtSearchNode->GetIndex() : 0u,
+				bwd.tgtSearchNode != nullptr ? bwd.tgtSearchNode->GetIndex() : 0u,
+				fwd.tgtPoint.x, fwd.tgtPoint.y, fwd.tgtPoint.z,
+				bwd.tgtPoint.x, bwd.tgtPoint.y, bwd.tgtPoint.z
+			);
+		}
 		return true;
 	}
 
-	return ExecutePathSearch();
+	const bool result = ExecutePathSearch();
+	if (ReplayCheckpointDebugPathSearchFrame()) {
+		LOG("[ReplayCheckpoint][qtpfs-search] execute-end frame=%d path=%u raw=0 result=%u full=%u part=%u waiting=%u rejectPartial=%u fwdSearched=%u bwdSearched=%u useFwdOnly=%u fwdConnected=%u bwdConnected=%u earlyDrop=%u fwdTgtNode=%u bwdTgtNode=%u fwdTgt=<%.8g,%.8g,%.8g> bwdTgt=<%.8g,%.8g,%.8g>",
+			gs->frameNum,
+			searchID,
+			result ? 1u : 0u,
+			haveFullPath ? 1u : 0u,
+			havePartPath ? 1u : 0u,
+			pathRequestWaiting ? 1u : 0u,
+			rejectPartialSearch ? 1u : 0u,
+			static_cast<unsigned int>(fwdNodesSearched),
+			static_cast<unsigned int>(bwdNodesSearched),
+			useFwdPathOnly ? 1u : 0u,
+			fwdPathConnected ? 1u : 0u,
+			bwdPathConnected ? 1u : 0u,
+			searchEarlyDrop ? 1u : 0u,
+			fwd.tgtSearchNode != nullptr ? fwd.tgtSearchNode->GetIndex() : 0u,
+			bwd.tgtSearchNode != nullptr ? bwd.tgtSearchNode->GetIndex() : 0u,
+			fwd.tgtPoint.x, fwd.tgtPoint.y, fwd.tgtPoint.z,
+			bwd.tgtPoint.x, bwd.tgtPoint.y, bwd.tgtPoint.z
+		);
+	}
+	return result;
 }
 
 void QTPFS::PathSearch::InitStartingSearchNodes() {
@@ -1659,6 +1778,28 @@ void QTPFS::PathSearch::Finalize(IPath* path) {
 
 	path->SetHasFullPath(haveFullPath);
 	path->SetHasPartialPath(havePartPath);
+
+	if (ReplayCheckpointDebugPathSearchFrame()) {
+		LOG("[ReplayCheckpoint][qtpfs-search] finalize frame=%d path=%u owner=%d points=%u nodes=%u hash=%08x full=%u part=%u raw=%u repath=%u firstClean=%u bboxMin=<%.8g,%.8g,%.8g> bboxMax=<%.8g,%.8g,%.8g>",
+			gs->frameNum,
+			searchID,
+			ReplayCheckpointDebugPathOwnerID(pathOwner),
+			path != nullptr ? path->NumPoints() : 0u,
+			path != nullptr ? path->NumNodes() : 0u,
+			path != nullptr ? path->CalculateHash() : 0u,
+			haveFullPath ? 1u : 0u,
+			havePartPath ? 1u : 0u,
+			rawPathCheck ? 1u : 0u,
+			path != nullptr ? path->GetRepathTriggerIndex() : 0u,
+			path != nullptr ? path->GetFirstNodeIdOfCleanPath() : 0u,
+			path != nullptr ? path->GetBoundingBoxMins().x : 0.0f,
+			path != nullptr ? path->GetBoundingBoxMins().y : 0.0f,
+			path != nullptr ? path->GetBoundingBoxMins().z : 0.0f,
+			path != nullptr ? path->GetBoundingBoxMaxs().x : 0.0f,
+			path != nullptr ? path->GetBoundingBoxMaxs().y : 0.0f,
+			path != nullptr ? path->GetBoundingBoxMaxs().z : 0.0f
+		);
+	}
 }
 
 void QTPFS::PathSearch::GetRectangleCollisionVolume(const QTPFS::SearchNode& snode, CollisionVolume& v, float3& rm) const {

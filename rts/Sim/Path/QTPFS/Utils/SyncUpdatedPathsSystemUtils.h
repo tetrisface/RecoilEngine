@@ -1,19 +1,56 @@
 #ifndef SYNC_UPDATED_PATHS_SYSTEM_UTILS_H_
 #define SYNC_UPDATED_PATHS_SYSTEM_UTILS_H_
 
+#include "Sim/Misc/GlobalSynced.h"
+#include "Sim/Objects/SolidObject.h"
 #include "Sim/Path/QTPFS/Registry.h"
+#include "System/Config/ConfigHandler.h"
+#include "System/Log/ILog.h"
 
 namespace QTPFS {
+
+	inline bool ReplayCheckpointDebugFinishPathFrame()
+	{
+		const int debugFrame = configHandler->GetInt("ReplayCheckpointDebugSignatureFrame");
+		return (debugFrame >= 0 && gs != nullptr && gs->frameNum == debugFrame);
+	}
+
+	inline int ReplayCheckpointPathOwnerID(const IPath* path)
+	{
+		if (path == nullptr || path->GetOwner() == nullptr)
+			return -1;
+
+		return path->GetOwner()->id;
+	}
 
 	inline void FinishPathSearch
         ( PathManager* pm
 		, PathSearch* search
         )
 	{
-        auto completePath = [pm](QTPFS::entity pathEntity, IPath* path){
+        auto completePath = [pm, search](QTPFS::entity pathEntity, IPath* path){
+			const int ownerBefore = ReplayCheckpointPathOwnerID(path);
+			const SearchModeIPath* searchModePath = registry.try_get<SearchModeIPath>(pathEntity);
+			const int ownerSearch = ReplayCheckpointPathOwnerID(searchModePath);
 
             // Transfer search update path, to the simulation-visible path.
             (*path) = std::move(registry.get<SearchModeIPath>(pathEntity));
+
+			if (ReplayCheckpointDebugFinishPathFrame()) {
+				LOG("[ReplayCheckpoint][qtpfs-finish] complete frame=%d path=%u searchPath=%u raw=%u found=%u ownerBefore=%d ownerSearch=%d ownerAfter=%d points=%u nodes=%u hash=%08x",
+					gs->frameNum,
+					static_cast<unsigned int>(entt::to_integral(pathEntity)),
+					search != nullptr ? search->GetID() : 0u,
+					(search != nullptr && search->rawPathCheck) ? 1u : 0u,
+					(search != nullptr && search->PathWasFound()) ? 1u : 0u,
+					ownerBefore,
+					ownerSearch,
+					ReplayCheckpointPathOwnerID(path),
+					path->NumPoints(),
+					path->NumNodes(),
+					path->CalculateHash()
+				);
+			}
 
             // inform the movement system that the path has been changed.
             if (registry.all_of<PathUpdatedCounterIncrease>(pathEntity)) {
@@ -74,4 +111,3 @@ namespace QTPFS {
 }
 
 #endif
-

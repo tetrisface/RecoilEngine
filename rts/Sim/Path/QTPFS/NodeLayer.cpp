@@ -52,6 +52,32 @@ void QTPFS::NodeLayer::Init(unsigned int layerNum) {
 	RECOIL_DETAILED_TRACY_ZONE;
 	assert((QTPFS::NodeLayer::NUM_SPEEDMOD_BINS + 1) <= MaxSpeedBinTypeValue());
 
+	for (std::vector<QTNode>& poolChunk: poolNodes) {
+		poolChunk.clear();
+	}
+	nodeIndcs.clear();
+	selectedNodes.clear();
+	openNodes.clear();
+	curSpeedMods.clear();
+	curSpeedBins.clear();
+	mapSquareStatusCache.clear();
+
+	numLeafNodes = 0;
+	updateCounter = 0;
+	numOpenNodes = 0;
+	numClosedNodes = 0;
+	maxNodesAlloced = 0;
+	numRootNodes = 0;
+	xRootNodes = 0;
+	zRootNodes = 0;
+	rootNodeSize = 0;
+	rootMask = 0;
+	xsize = 0;
+	zsize = 0;
+	maxRelSpeedMod = 0.0f;
+	avgRelSpeedMod = 0.0f;
+	useShortestPath = false;
+
 	constexpr size_t initialNodeReserve = 256;
 	openNodes.reserve(initialNodeReserve);
 	selectedNodes.reserve(initialNodeReserve);

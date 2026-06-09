@@ -5,7 +5,7 @@ to turn each desync we find into a focused test target, even if the current
 engine shape requires smoke tests before smaller unit tests are practical.
 
 Upstream design context and source links are summarized in
-[`docs/replay-checkpoint-upstream-notes.md`](replay-checkpoint-upstream-notes.md).
+[`replay-checkpoint-upstream-notes.md`](replay-checkpoint-upstream-notes.md).
 
 ## Acceptance Invariant
 
@@ -37,8 +37,15 @@ Use the Windows scripts until the engine has smaller injectable seams:
   -LoadFrame 180 `
   -TargetFrame 90 `
   -ResumeFrame 181 `
-  -LuaRulesSelfTest
+  -LuaRulesSelfTest `
+  -RequireSynctestMarkers `
+  -RequireSyncChecksumRestore
 ```
+
+When the smoke resumes far enough to emit the restored replay digest, add
+`-RequirePostRestoreSyncHash`; it restarts the Lua synctest checksum capture
+after restore, requires a contiguous restored frame span through the synctest
+end frame, and compares every emitted frame against the recorded replay artifact.
 
 This is an integration test, not a unit test, but it is currently the strongest
 evidence because it exercises CREG load, Lua state, demo replay, frame
@@ -142,6 +149,61 @@ Current status:
 - The next test target should compare CREG-restored QTPFS path internals and
   `CGroundMoveType` waypoint/progress state after load, before replay resume.
   Path IDs alone are not enough.
+- Added a gated QTPFS diagnostic for that target:
+  `ReplayCheckpointDebugSignatureFrame=<frame>` now logs `[ReplayCheckpoint][qtpfs-sig]`
+  aggregates and `[ReplayCheckpoint][qtpfs-path]` path details through the
+  `IPathManager` diagnostic seam.
+- Smoke fixture `.cache/replay-timeline-synctest/run_20260605_143557` with
+  `SaveFrame=90 LoadFrame=180 TargetFrame=90 ResumeFrame=181 DebugSignatureFrame=91`
+  showed that QTPFS is already divergent at the first restored frame. Original
+  frame 91 `simframe-begin` had `paths=227 pathHash=86d28eac`; restored frame 91
+  had `paths=114 pathHash=1adddf21` while the general game signature still
+  matched (`sync=4cc0a5f3 units=354 syncedProjectiles=219`).
+- The same run showed original frame 91 `after-path-update` as
+  `paths=124 pathHash=74b9606f`, while restored frame 91 had
+  `paths=118 pathHash=da586620`. The run resumed to frame 181 but failed the
+  invariant with `DESYNC WARNING` at replay sync frames 120 and 180.
+- A guard that skips `RestoreReplayCheckpointPathAllocator()` while rebuilt
+  QTPFS searches are still live removed the prior frame-103 crash in
+  `QTPFS::PathManager::ExecuteQueuedSearches`, but it is not a correctness fix:
+  it only avoids rewiring the allocator under live searches and exposes the
+  remaining path-state desync.
+- Next test seam: restore or round-trip QTPFS path/search/cache state directly,
+  or make `CGroundMoveType` reconstruction prove exact path population,
+  `PathSearchRef`, temp/requeue flags, shared-path cache state, and waypoint
+  progress before any replay frame resumes.
+
+## 2026-06-09 QTPFS Allocator Restore Attempt
+
+Bug shape:
+
+- The allocator/order restoration attempt now restores QTPFS registry structure and empty placeholders after explicit path replay restore, but `PathManager::Update()` still diverges by frame-91 unit/path stage.
+- The same smoke run records two frame-91 signature streams: one before checkpoint restore and one immediately after restore.
+
+Attempted fix and evidence:
+
+- Run: `.cache/replay-timeline-synctest/run_20260609_004724`
+- Bundle: `run_20260609_004724/write_episode_0/demos/rcp_533a9a6c.replay-checkpoints`
+- Smoke command:
+  `scripts/replay-checkpoint-smoke-windows.ps1 -RunDir .\.cache\replay-timeline-synctest\run_20260609_004724 -SpringExe .\RecoilEngine\build-windows\install\spring.exe -SaveFrame 90 -LoadFrame 180 -TargetFrame 90 -ResumeFrame 181 -DebugSignatureFrame 91 -LuaRulesSelfTest -RequireSynctestMarkers -TimeoutSeconds 300`
+- Playback logs show:
+  - `[ReplayCheckpoint] reset QTPFS registry for load: removed 262 live entities (217 paths, 0 searches)`
+  - `[ReplayCheckpoint] pruned 43 extra empty QTPFS registry entities after load`
+  - Simframe-begin frame 91 signatures match across both streams:
+    - game: `sync=42dffe2b`, `units=356`, `features=4`, `syncedProjectiles=187`
+    - qtpfs: `live=312 paths=267 nonPath=45 empty=44 ... searchRefs=0 searchMode=267 delayedDelete=136 pathHash=a1664fe2 searchHash=8d12f3ab`
+  - The split now appears at frame-91 unit/path phase:
+    - `after-unit-update` game sync changes from `89352776` to `c8e73ffa`
+    - `after-unit-update` qtpfs-path hash changes from `c3db5321` to `7757eb9b`
+    - `after-path-update` qtpfs-path hash changes from `3856be5a` to `dab2513d`
+    - by `after-projectile-update`, search hash differs (`56b9474d` vs `4b4021a1`)
+- The run still fails sync equivalence:
+  - frame 120: expected `71887be3`, got `7378617f`
+  - frame 180: expected `5eb093ad`, got `c126dd15`
+
+Current seam:
+
+- Trace queued searches and allocator reuse at the unit-update boundary, then compare deleted path IDs, search queue ordering, shared-chain updates, and qtpfs path hashes in a deterministic frame-91 fixture.
 
 ### Replay Restore Frame Accounting
 
@@ -235,3 +297,380 @@ sync equivalence is already green.
 
 The smaller tests should catch known mistakes quickly. The SYNCCHECK replay test
 remains the authority for whether rewind is actually safe.
+
+## 2026-06-09 QTPFS Exact Path Snapshot Evidence
+
+Bug shape:
+
+- Rebuilding QTPFS paths from move types was not enough: restored path IDs could
+  exist while path internals, owner pointers, shared path chains, search scratch
+  components, delayed-delete markers, and allocator placeholders still diverged.
+- Using only active entities for `entt::registry::assign` caused restore
+  hangs/crashes. The raw entity table is needed for EnTT restore, but extra empty
+  placeholders then had to be pruned to match the original live allocator state.
+
+Attempted fixes and evidence:
+
+- Added QTPFS checkpoint snapshots for path points, nodes, owner presence,
+  `SearchModeIPath`, `PathDelayedDelete`, `SharedPathChain`,
+  `PartialSharedPathChain`, and original empty placeholder entities.
+- Fixed owner id `0` by storing `hasOwner` separately from `ownerID`.
+- Fresh fixture `.cache/replay-timeline-synctest/run_20260609_000331`, bundle
+  `rcp_1c4ae7fe.replay-checkpoints`, verified checkpoint frames 90/180/270.
+- Smoke command:
+  `scripts/replay-checkpoint-smoke-windows.ps1 -RunDir .\.cache\replay-timeline-synctest\run_20260609_000331 -SpringExe .\RecoilEngine\build-windows\install\spring.exe -SaveFrame 90 -LoadFrame 180 -TargetFrame 90 -ResumeFrame 181 -DebugSignatureFrame 91 -LuaRulesSelfTest -RequireSynctestMarkers -TimeoutSeconds 300`
+- Restore pruned 43 extra empty QTPFS entities and restored 237 paths. At frame
+  91 `simframe-begin`, original and restored now match on counts:
+  `live=282 paths=237 nonPath=45 empty=44 searches=0 temp=24 requeue=237
+  searchMode=237 delayedDelete=127 sharedChains=23 partialChains=30`, and all
+  237 `[qtpfs-path] simframe-begin` entries match by entity and value.
+- The run still desyncs: sync warnings at frames 120 and 180. The first narrowed
+  QTPFS split is after `PathManager::Update()` on frame 91: original has
+  `paths=126 dirty=0 delayedDelete=18 sharedChains=20 partialChains=26`, while
+  restored has `paths=125 dirty=4 delayedDelete=17 sharedChains=18
+  partialChains=23`.
+- After-path-update path-set delta: original-only entities
+  `131,181,1048884,3145907,4194591,5243158,6291550`; restored-only entities
+  `46,94,1048657,4194430,6291516,6291558`. Four shared/partial paths remain
+  dirty only after restore: entities `114`, `344`, `139`, and `1048697`.
+
+Future seam:
+
+- Compare or restore QTPFS search execution inputs and shared-chain head/order
+  decisions through `PathManager::Update()`, not just the state visible before
+  the update. A focused test should start from matching path snapshots and assert
+  that one path update produces the same deleted paths, dirty flags, shared-chain
+  removals, and search hashes.
+
+### QTPFS Queue/Process Diagnostics Instrumentation
+
+Attempted fix:
+
+- Added frame-gated QTPFS logs in `RecoilEngine/rts/Sim/Path/QTPFS/PathManager.cpp`
+  for `ReplayCheckpointDebugSignatureFrame`:
+  - `qtpfs-queue` stream in `QueueSearch` (`queue-search`) and `RequeueSearch`
+    (`requeue-search`)
+  - `qtpfs-queue` snapshots in `ExecuteQueuedSearches` (`before-ready`,
+    `after-ready`, `after-raw-clean`, `before-background`)
+- This aims to isolate queue/scratch state transitions at the frame-91 unit-update
+  boundary where divergence begins.
+
+Current status:
+
+- Executed on later fixture `.cache/replay-timeline-synctest/run_20260609_110541`.
+  The queue/search logs showed path registry/request/chain state matching while
+  the actual search result for path `5242982` diverged at frame 115. That moved
+  the root cause from queue ordering to QTPFS node-layer graph state.
+
+### QTPFS Node-Layer Graph Restore
+
+Bug shape:
+
+- QTPFS path snapshots could restore path entities, owners, chains, and queued
+  request inputs exactly, but the node-layer graph used by `PathSearch` still
+  reflected the later load-frame world.
+- Frame 115 path `5242982` had matching source, target, owner, path type,
+  `srcNode=7353`, `tgtNode=4975`, shared-chain head, and search thread in both
+  streams, yet search execution diverged.
+- Original frame 115 search: `fwdSearched=36 bwdSearched=35 fwdConnected=1
+  bwdConnected=0 fwdTgtNode=6747 bwdTgtNode=6750`, final path
+  `points=14 nodes=13 hash=64892c16`.
+- Restored-before-fix frame 115 search: `fwdSearched=35 bwdSearched=35
+  fwdConnected=0 bwdConnected=1 fwdTgtNode=6750 bwdTgtNode=6754`, final path
+  `points=13 nodes=12 hash=51e80fbe`.
+- The narrowed node evidence was QTPFS layer 11 node `4975`: original
+  `layerHash=12e0885d cost=2.007874 neighbours=6 neighbourHash=bf0ac5be`;
+  restored-before-fix `layerHash=8a7d2239 cost=2.0193019 neighbours=8
+  neighbourHash=4cf3874b`.
+
+Fix:
+
+- Added the path-manager IoC hook
+  `IPathManager::RebuildReplayCheckpointNodeLayersForLoad()`.
+- QTPFS implements the hook by reinitializing node layers, node-layer map damage
+  trackers, `PathSpeedModInfoSystem`, and `pfsCheckSum` from the restored map
+  and blocking state.
+- `CGame::LoadReplayCheckpoint()` now calls `readMap->UpdateHeightBounds()` and
+  the hook after CREG restore and `ResetLivePathsForLoad()`, but before
+  `RestoreReplayCheckpointPathsForLoad()`. This keeps QTPFS ownership inside the
+  path manager and avoids CGame reaching into node-layer internals.
+- `NodeLayer::Init()` now clears its existing pools, caches, counters, and root
+  metadata before rebuilding so replay restore can reuse layer objects without
+  tripping global QTPFS node registration lifetime.
+
+Verified evidence:
+
+- Build: Docker Windows SYNCCHECK build exited `0`.
+- Fixture: `.cache/replay-timeline-synctest/run_20260609_110541`
+- Bundle: `write_episode_0/demos/rcp_4c3b3d19.replay-checkpoints`
+- Frame 115 probe:
+  `.cache/replay-checkpoint-smoke/debug_signature_frame115_rebuilt_layers_*`
+  passed to resume frame 117. Restored frame 115 now matches original node
+  `4975` (`layerHash=12e0885d`, `neighbours=6`) and path `5242982` finalizes as
+  `points=14 nodes=13 hash=64892c16`.
+- Frame 120 probe:
+  `.cache/replay-checkpoint-smoke/debug_signature_frame120_rebuilt_layers_*`
+  passed to resume frame 122. Both streams have path `5242982` at simframe-begin
+  with `points=14 nodes=13 pointHash=64892c16`.
+- Frame 139 probe:
+  `.cache/replay-checkpoint-smoke/debug_signature_frame139_rebuilt_layers_*`
+  passed to resume frame 141. Both simframe-begin signatures match:
+  `sync=acad9b00`, QTPFS `pathHash=a08f47c3`, `searchHash=8d12f3ab`.
+- Full strict smoke:
+  `.cache/replay-checkpoint-smoke/strict_resume181_after_qtpfs_rebuild_console.txt`
+  passed with `SaveFrame=90 LoadFrame=121 TargetFrame=90 ResumeFrame=181`.
+  The run restored to frame 90 paused and resumed to frame 181 with no
+  `DESYNC WARNING` or sync-hash mismatch markers.
+- LuaUI checkpoint smoke:
+  `.cache/replay-checkpoint-smoke/strict_luaui_resume181_after_qtpfs_rebuild_console.txt`
+  passed through `gui_replaybuttons.lua` with the same `SaveFrame=90
+  LoadFrame=121 TargetFrame=90 ResumeFrame=181` window. The infolog shows the
+  widget-issued load at frame 121, the engine restore to checkpoint frame 90,
+  QTPFS node-layer rebuild, sync-check checksum restore
+  `29b70229 -> 29b70229`, restored pause state, and resume to frame 181. No
+  `DESYNC WARNING`, sync-hash mismatch, keyframe difference, or Lua traceback
+  marker was found.
+- BAR replay timeline forward smoke:
+  `.cache/replay-timeline-smoke/run_20260609_110541_forward181_fullsync_console.txt`
+  passed with `StartFrame=30 TargetFrame=181 QuitFrame=421`,
+  `RequireSynctestMarkers`, and `RequireSyncHash`. The BAR replay widget reached
+  frame 181, continued to the full 420-frame synctest end, and reproduced the
+  recorded digest `xPXHk2p0w3oXfN+miaWxTg==` for frames `0..419`. A post-quit
+  `Ecostats` DrawScreen warning appeared after sync hash emission and
+  `QuitAction`; it did not affect replay checkpoint restore/resume evidence.
+
+Future seam:
+
+- Add a direct node-layer restore invariant after map/blocking restore: compare
+  per-move-def layer checksums and selected node signatures before any path
+  entities are restored or searches execute.
+- Keep the end-to-end SYNCCHECK restore/resume smoke as the authority because
+  matching node layers alone does not prove replay determinism.
+
+### Later Checkpoint QTPFS Path-Set Mismatch
+
+Bug shape:
+
+- The node-layer rebuild fixed the checkpoint-90 restore/resume window, but a
+  broader restore to checkpoint frame 180 from the same fixture still desyncs.
+- Strict LuaRules smoke:
+  `.cache/replay-checkpoint-smoke/strict_luarules_target180_resume300_after_qtpfs_rebuild_console.txt`
+  used `SaveFrame=180 LoadFrame=241 TargetFrame=180 ResumeFrame=300`.
+- The run restored frame 180 and resumed, then hit `DESYNC WARNING` at frame
+  240: demo checksum `ca11ddd3`, restored checksum `8c1087a9`.
+
+Observed evidence:
+
+- A short debug run with `DebugSignatureFrame=181` passed to resume frame 182:
+  `.cache/replay-checkpoint-smoke/debug_signature_frame181_target180_resume182_console.txt`.
+- General `[ReplayCheckpoint][sig]` state matched original/restored at every
+  frame-181 phase from `simframe-begin` through `simframe-end`, including units,
+  features, projectiles, RNG, and sync checksum.
+- QTPFS was already different at frame-181 `simframe-begin`, before that frame's
+  simulation work:
+  - original: `live=288 size=304 paths=243 delayedDelete=133 sharedChains=31
+    partialChains=37 pathHash=0c02fc5c searchHash=8d12f3ab`
+  - restored: `live=287 size=303 paths=242 delayedDelete=132 sharedChains=30
+    partialChains=36 pathHash=45958dea searchHash=8d12f3ab`
+- The mismatch is path entity population/ownership, not the node-layer graph:
+  the diff has 101 original-only path entities, 100 restored-only path entities,
+  and 10 shared entity IDs with different owner/path payload state.
+- Representative changed shared entry: entity `200` is an ownerless delayed
+  shared/partial path in the original (`owner=-1 type=38 hash=d006c495`) but a
+  live owner path in restored state (`owner=2132 type=17 hash=07a4b313`).
+
+Current suspicion:
+
+- Later checkpoint bundles may be saving/restoring QTPFS path snapshots at a
+  different lifecycle boundary than the replay comparison expects, or the path
+  snapshot restore is losing delayed-delete/shared-chain ownership identity when
+  the path set has churned longer.
+- Next diagnostic should compare `DebugSignatureFrame=180` around the save/load
+  boundary and then inspect `ReplayCheckpointHandler::UpdateRecordFrame()` plus
+  QTPFS snapshot capture/restore timing.
+
+### Later Checkpoint Restore: Owner, Feature Queue, And Smooth Mesh
+
+This section supersedes the QTPFS-only suspicion above for the frame-180 restore
+window. The later checkpoint failure needed three narrower fixes before the
+cache-mutated smoke appeared to pass; the clean archive-consistent recheck below
+shows restore/resume still has an open drift.
+
+Bug shapes:
+
+- QTPFS delayed shared/partial paths were restored with `owner=nullptr` even
+  when the snapshot had serialized an owner. Preserving the serialized owner
+  removed the path-owner mismatch as the leading explanation for the frame-240
+  desync.
+- `CFeatureHandler::updateFeatures` could keep stale idle feature entries after
+  CREG load. Frame-181 evidence showed restored feature `24272` remained queued
+  while the original path did not.
+- `CReadMap::PostLoad()` calls full-map `mapDamage->RecalcArea()`, which calls
+  `smoothGround.MapChanged()`. For replay checkpoints this was wrong because
+  `SmoothHeightMesh` already serialized its mesh and pending update queues.
+  Restore repopulated a full-map smooth damage queue, so frame 201 processed a
+  different smooth-mesh work item.
+
+Observed smooth-mesh evidence:
+
+- Before the smooth guard, frame 180 original `simframe-end` had
+  `smooth-sig hash=8fd15c2f queues=6/0/0/0`; restored `after-post-load` had
+  `hash=4dee51c5 queues=192/0/0/0`.
+- At frame 201, the visible smooth height sample matched before
+  `UpdateSmoothMesh()`, but original processed a vertical blur item while
+  restored processed damage/maxima work. Unit `21999` (`CStrafeAirMoveType`)
+  then read `groundHeight=311.504364` on the original path and
+  `311.504242` on the restored path, diverging immediately after
+  `GeneralMoveSystem::Update()`.
+
+Fixes:
+
+- QTPFS restore now preserves serialized owners for delayed shared/partial path
+  snapshots.
+- `CFeatureHandler::RestoreUpdateQueueForLoad()` preserves valid serialized
+  feature queue order, removes invalid/stale/duplicate entries, repairs
+  `inUpdateQue`, and adds missing features that still need updates. The repair
+  log for the frame-180 fixture was:
+  `restored feature update queue after load: size=26 stale=1 invalid=0 duplicate=0 repairedFlags=0 added=0`.
+- `SmoothHeightMesh` now has a replay-checkpoint load guard that suppresses
+  `MapChanged()` notifications while `CCregLoadSaveHandler::LoadGame()` runs
+  inside `CGame::LoadReplayCheckpoint()`. Read-map, LOS, feature, and pathing
+  post-load refreshes can still run, but the smooth mesh keeps its serialized
+  queue state.
+
+Verified evidence:
+
+- Build: Docker Windows SYNCCHECK target build exited `0`.
+- Fixture: `.cache/replay-timeline-synctest/run_20260609_142625`
+- Bundle:
+  `write_episode_0/demos/rcp_f2ccdd39.replay-checkpoints`
+- Reproducibility caveat: this fixture is historical evidence only. The cached
+  BAR game directory was edited after recording to add the post-restore
+  synctest restart, and later smoke logs for this fixture contain the engine
+  warning `Archive Beyond-All-Reason.sdd ... differs from the host's copy`.
+  These runs still document fix progression, but they are not final acceptance
+  proof.
+- Feature queue proof:
+  `.cache/replay-checkpoint-smoke/debug_feature_queue_frame181_target180_resume182_after_feature_queue_restore_infolog.txt`
+  matched frame-181 original/restored signatures through feature/script/end
+  after the stale feature repair.
+- Smooth restore-boundary proof:
+  `.cache/replay-checkpoint-smoke/debug_smooth_mesh_frame180_target180_resume182_after_smooth_guard_infolog.txt`
+  logged `suppressed 1 smooth mesh map-change notifications during checkpoint
+  load`; restored `after-post-load` matched original `simframe-end` with
+  `smooth-sig hash=8fd15c2f queues=6/0/0/0`.
+- Frame-201 proof:
+  `.cache/replay-checkpoint-smoke/debug_smooth_mesh_frame201_target180_resume202_after_smooth_guard_infolog.txt`
+  matched smooth hashes in both streams:
+  `simframe-begin hash=eb0d93da`, `after-smoothground-update hash=22107424`.
+  Unit `21999` read the same strafe input in both streams
+  (`groundHeight=311.504364`, `ctrl=<1,-0.286880136,1>`), and both streams had
+  `after-general-move-system sync=ce5702cb unitHash=04076446`.
+- Historical strict LuaRules smoke for the earlier checkpoint on that fixture:
+  `.cache/replay-checkpoint-smoke/strict_luarules_target90_resume421_post_restore_synchash_after_smooth_guard_final_build_infolog.txt`
+  passed with `SaveFrame=90 LoadFrame=121 TargetFrame=90 ResumeFrame=421`,
+  `RequireSynctestMarkers`, `RequireSyncChecksumRestore`, and
+  `RequirePostRestoreSyncHash`. The C++ SYNCCHECK restore marker was
+  `restored sync-check checksum d1da9f70 for checkpoint frame 90`; the
+  reconstructed digest artifact
+  `.cache/replay-checkpoint-smoke/strict_luarules_target90_resume421_post_restore_synchash_after_smooth_guard_final_build_synchash.json`
+  has digest `KkAnEdKkgjCguex7MIP6MQ==` for the contiguous 330-frame restored
+  span `90..419`, and every emitted checksum matched the original replay
+  artifact.
+- Historical strict LuaRules smoke for the later checkpoint on that fixture:
+  `.cache/replay-checkpoint-smoke/strict_luarules_target180_resume421_post_restore_synchash_after_smooth_guard_final_build_infolog.txt`
+  passed with `SaveFrame=180 LoadFrame=241 TargetFrame=180 ResumeFrame=421`,
+  `RequireSynctestMarkers`, `RequireSyncChecksumRestore`, and
+  `RequirePostRestoreSyncHash`. The C++ SYNCCHECK restore marker was
+  `restored sync-check checksum 3b37ccdd for checkpoint frame 180`; the
+  reconstructed digest artifact
+  `.cache/replay-checkpoint-smoke/strict_luarules_target180_resume421_post_restore_synchash_after_smooth_guard_final_build_synchash.json`
+  has digest `f4P+6UsMt7vWK3LSw0l++Q==` for the contiguous 240-frame restored
+  span `180..419`, and every emitted checksum matched the original replay
+  artifact.
+- Historical strict LuaUI replay-widget smoke for the earlier checkpoint on
+  that fixture:
+  `.cache/replay-checkpoint-smoke/strict_luaui_target90_resume421_post_restore_synchash_after_smooth_guard_final_build_infolog.txt`
+  passed with `SaveFrame=90 LoadFrame=121 TargetFrame=90 ResumeFrame=421`,
+  `RequireSynctestMarkers`, `RequireSyncChecksumRestore`, and
+  `RequirePostRestoreSyncHash`. The C++ SYNCCHECK restore marker was
+  `restored sync-check checksum d1da9f70 for checkpoint frame 90`; the
+  reconstructed digest artifact
+  `.cache/replay-checkpoint-smoke/strict_luaui_target90_resume421_post_restore_synchash_after_smooth_guard_final_build_synchash.json`
+  has digest `KkAnEdKkgjCguex7MIP6MQ==` for the contiguous 330-frame restored
+  span `90..419`, and every emitted checksum matched the original replay
+  artifact.
+- Historical strict LuaUI replay-widget smoke after the rebuild:
+  `.cache/replay-checkpoint-smoke/strict_luaui_target180_resume421_post_restore_synchash_after_smooth_guard_final_build_infolog.txt`
+  passed with `SaveFrame=180 LoadFrame=241 TargetFrame=180 ResumeFrame=421`,
+  `RequireSynctestMarkers`, `RequireSyncChecksumRestore`, and
+  `RequirePostRestoreSyncHash`. The log includes `gui_replaybuttons.lua`, the
+  C++ SYNCCHECK restore marker `restored sync-check checksum 3b37ccdd for
+  checkpoint frame 180`, and the opt-in Lua restart marker
+  `sync-hash: restarted after replay checkpoint restore at frame 180`. The
+  reconstructed post-restore digest artifact
+  `.cache/replay-checkpoint-smoke/strict_luaui_target180_resume421_post_restore_synchash_after_smooth_guard_final_build_synchash.json`
+  has digest `f4P+6UsMt7vWK3LSw0l++Q==` for the contiguous 240-frame restored
+  span `180..419`, and every emitted checksum matched the original replay
+  artifact. No `DESYNC WARNING`, sync error, sync-hash mismatch, or
+  keyframe-difference marker appeared.
+
+Clean archive-consistent recheck:
+
+- Re-recorded fixture `.cache/replay-timeline-synctest/run_20260609_175435`
+  after the local BAR harness change, so the replay and cached game archive both
+  use the same `dbg_synctest.lua`. The recorded artifact has digest
+  `Z2RQaqAOpChFwgKxO3ASnA==` for frames `0..419`, demo
+  `write_episode_0/demos/2026-06-09_15-55-18-098_Comet Catcher Remake 1.8_2026.06.06-54-gd2e1651 keyframes-rewind-catchup.sdfz`,
+  and bundle `write_episode_0/demos/rcp_20d5a147.replay-checkpoints`.
+- BAR replay timeline forward smoke on the clean fixture passed:
+  `.cache/replay-timeline-smoke/run_20260609_175435/write/infolog.txt`
+  used `StartFrame=30 TargetFrame=181 QuitFrame=421` and reproduced digest
+  `Z2RQaqAOpChFwgKxO3ASnA==` for frames `0..419` without archive mismatch.
+- LuaRules restore to checkpoint `90` failed the acceptance invariant:
+  `.cache/replay-checkpoint-smoke/clean_luarules_target90_resume421_desync_frame420_infolog.txt`
+  restored the C++ SYNCCHECK boundary `653aa44d`, restarted post-restore
+  checksum capture at frame `90`, then hit `DESYNC WARNING` at frame `420`
+  (`demo=c065d92c`, restored `b60cc458`). Reconstructed artifact
+  `.cache/replay-checkpoint-smoke/clean_luarules_target90_resume421_desync_frame420_synchash.json`
+  has digest `38sMPRU8iyZqbVrwYRrtDg==` for `90..419`; per-frame comparison
+  found 29 mismatches, first at frame `391` (`recorded=-1144226304`,
+  `restored=876662720`).
+- After moving the script's generic desync guard after post-restore hash
+  reconstruction, rerun
+  `.cache/replay-checkpoint-smoke/clean_luarules_target90_resume421_hash_guard_failure_infolog.txt`
+  failed directly with `Post-restore sync hash mismatch at frame 391` and left
+  `.cache/replay-checkpoint-smoke/clean_luarules_target90_resume421_hash_guard_failure_synchash.json`.
+- LuaRules restore to checkpoint `180` also failed:
+  `.cache/replay-checkpoint-smoke/clean_luarules_target180_resume421_desync_infolog.txt`
+  restored the C++ SYNCCHECK boundary `50eefdc7`, then logged desync warnings at
+  frames `240`, `300`, `360`, and `420` (`f240 demo=dedc92c8`, restored
+  `c2d68818`). Reconstructed artifact
+  `.cache/replay-checkpoint-smoke/clean_luarules_target180_resume421_desync_synchash.json`
+  has digest `r7tmLxOACCQLllB5bM42aQ==` for `180..419`; per-frame comparison
+  found 198 mismatches, first at frame `222` (`recorded=-1987333504`,
+  `restored=-124341952`).
+
+Current status:
+
+- The clean fixture is now the authority for acceptance, and restore/resume is
+  still open. The older fixture is useful history but is superseded for final
+  proof because its archive checksum mismatch could hide reproducibility errors.
+- The next diagnostic should probe the clean fixture around the first mismatch
+  frames (`222` for checkpoint `180`, `391` for checkpoint `90`) with subsystem
+  signatures and the narrowest available IoC seams: sync trace, smooth mesh,
+  feature queue, QTPFS path/queue state, and move-system state at the exact
+  resume-frame boundary.
+
+Future seams:
+
+- Add a `SmoothHeightMesh` CREG/load regression test that restores a serialized
+  mesh with pending queues and proves read-map postload does not enqueue a
+  full-map smooth update during replay checkpoint restore.
+- Keep the smooth-mesh signature logger gated by
+  `ReplayCheckpointDebugSignatureFrame`; it is useful for queue/hash comparison
+  but should remain diagnostic-only.
+- Move the opt-in post-restore Lua digest restart toward a smaller harness seam
+  or engine-owned replay artifact. The current UI smoke now compares a fresh
+  post-restore `sync-hash-json` artifact, but normal Lua reload still resets the
+  unsynced `dbg_synctest` buffer unless the harness explicitly restarts it.

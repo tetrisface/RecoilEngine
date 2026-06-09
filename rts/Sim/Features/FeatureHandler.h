@@ -62,11 +62,13 @@ public:
 	void DeleteFeature(CFeature* feature);
 
 	void LoadFeaturesFromMap();
+	void RestoreUpdateQueueForLoad();
 
 	void SetFeatureUpdateable(CFeature* feature);
 	void TerrainChanged(int x1, int y1, int x2, int y2);
 
 	const spring::unordered_set<int>& GetActiveFeatureIDs() const { return activeFeatureIDs; }
+	const std::vector<CFeature*>& GetUpdateFeatures() const { return updateFeatures; }
 
 private:
 	bool CanAddFeature(int id) const {

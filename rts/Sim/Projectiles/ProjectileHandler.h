@@ -4,6 +4,7 @@
 #define PROJECTILE_HANDLER_H
 
 #include <array>
+#include <cstdint>
 #include <vector>
 
 #include "Rendering/Models/3DModelDefs.hpp"
@@ -64,6 +65,9 @@ public:
 	}
 
 	int GetCurrentParticles() const;
+	size_t GetReplayCheckpointFreeKeyCount(bool synced) const;
+	uint32_t GetReplayCheckpointFreeKeyHash(bool synced) const;
+	uint32_t GetReplayCheckpointActiveKeyHash(bool synced) const;
 
 	void AddProjectile(CProjectile* p);
 	void AddGroundFlash(CGroundFlash* flash) { groundFlashes.push_back(flash); }

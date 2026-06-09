@@ -10,6 +10,7 @@
 #include "Sim/Misc/CollisionHandler.h"
 #include "Sim/Misc/CollisionVolume.h"
 #include "Sim/Misc/GeometricObjects.h"
+#include "Sim/Misc/GlobalSynced.h"
 #include "Sim/Misc/LosHandler.h"
 #include "Sim/Misc/QuadField.h"
 #include "Sim/Misc/TeamHandler.h"
@@ -18,10 +19,14 @@
 #include "Sim/Units/UnitTypes/Factory.h"
 #include "Sim/Weapons/PlasmaRepulser.h"
 #include "Sim/Weapons/WeaponDef.h"
+#include "System/Config/ConfigHandler.h"
 #include "System/GlobalConfig.h"
+#include "System/Log/ILog.h"
 #include "System/SpringMath.h"
 
 #include <algorithm>
+#include <cstdint>
+#include <cstring>
 #include <vector>
 
 #include "System/Misc/TracyDefs.h"
@@ -29,6 +34,19 @@
 //////////////////////////////////////////////////////////////////////
 // Local/Helper functions
 //////////////////////////////////////////////////////////////////////
+
+static bool ReplayCheckpointDebugTraceRayFrame()
+{
+	const int debugFrame = configHandler->GetInt("ReplayCheckpointDebugSignatureFrame");
+	return (debugFrame >= 0 && gs != nullptr && gs->frameNum == debugFrame);
+}
+
+static uint32_t ReplayCheckpointTraceRayFloatBits(float value)
+{
+	uint32_t bits = 0;
+	std::memcpy(&bits, &value, sizeof(bits));
+	return bits;
+}
 
 /**
  * helper for TestCone
@@ -222,6 +240,7 @@ float TraceRay(
 	const bool scanForCloaked  = ((traceFlags & Collision::NOCLOAKED   ) == 0);
 
 	const bool scanForAnyUnits = scanForEnemies || scanForAllies || scanForNeutrals || scanForCloaked;
+	const bool debugTraceRayFrame = ReplayCheckpointDebugTraceRayFrame();
 
 	hitFeature = nullptr;
 	hitUnit = nullptr;
@@ -231,6 +250,7 @@ float TraceRay(
 
 	if (scanForFeatures || scanForAnyUnits) {
 		CollisionQuery cq;
+		const float3 traceEnd = pos + dir * traceLength;
 
 		QuadFieldQuery qfQuery;
 		quadField.GetQuadsOnRay(qfQuery, pos, dir, traceLength);
@@ -252,8 +272,43 @@ float TraceRay(
 					if (!f->HasCollidableStateBit(CSolidObject::CSTATE_BIT_QUADMAPRAYS))
 						continue;
 
-					if (CCollisionHandler::DetectHit(f, f->GetTransformMatrix(true), pos, pos + dir * traceLength, &cq, true)) {
+					const float traceLengthBefore = traceLength;
+					if (CCollisionHandler::DetectHit(f, f->GetTransformMatrix(true), pos, traceEnd, &cq, true)) {
 						const float len = cq.GetHitPosDist(pos, dir);
+						const bool accepted = (len < traceLength);
+
+						if (debugTraceRayFrame) {
+							const CollisionVolume& cv = f->collisionVolume;
+							const float3 hitPos = cq.GetHitPos();
+							const float3 featureRelMid = float3(f->relMidPos.x, f->relMidPos.y, f->relMidPos.z);
+
+							LOG("[ReplayCheckpoint][traceray] feature-hit frame=%d owner=%d quad=%d candidate=%d accepted=%u prevLength=%.9g prevLengthBits=%08x len=%.9g lenBits=%08x pos=<%.9g,%.9g,%.9g> dir=<%.9g,%.9g,%.9g> hitPos=<%.9g,%.9g,%.9g> hitPosBits=<%08x,%08x,%08x> featurePos=<%.9g,%.9g,%.9g> featureRelMid=<%.9g,%.9g,%.9g> cvType=%d cvAxis=%d cvScales=<%.9g,%.9g,%.9g> cvOffsets=<%.9g,%.9g,%.9g> cvIgnore=%u cvCont=%u cvFoot=%u cvPiece=%u",
+								gs->frameNum,
+								owner != nullptr ? owner->id : -1,
+								quadIdx,
+								f->id,
+								accepted ? 1u : 0u,
+								traceLengthBefore,
+								ReplayCheckpointTraceRayFloatBits(traceLengthBefore),
+								len,
+								ReplayCheckpointTraceRayFloatBits(len),
+								pos.x, pos.y, pos.z,
+								dir.x, dir.y, dir.z,
+								hitPos.x, hitPos.y, hitPos.z,
+								ReplayCheckpointTraceRayFloatBits(hitPos.x),
+								ReplayCheckpointTraceRayFloatBits(hitPos.y),
+								ReplayCheckpointTraceRayFloatBits(hitPos.z),
+								f->pos.x, f->pos.y, f->pos.z,
+								featureRelMid.x, featureRelMid.y, featureRelMid.z,
+								cv.GetVolumeType(),
+								cv.GetPrimaryAxis(),
+								cv.GetScales().x, cv.GetScales().y, cv.GetScales().z,
+								cv.GetOffsets().x, cv.GetOffsets().y, cv.GetOffsets().z,
+								cv.IgnoreHits() ? 1u : 0u,
+								cv.UseContHitTest() ? 1u : 0u,
+								cv.DefaultToFootPrint() ? 1u : 0u,
+								cv.DefaultToPieceTree() ? 1u : 0u);
+						}
 
 						// we want the closest feature (intersection point) on the ray
 						if (len >= traceLength)
@@ -290,8 +345,63 @@ float TraceRay(
 					if (!doHitTest)
 						continue;
 
-					if (CCollisionHandler::DetectHit(u, u->GetTransformMatrix(true), pos, pos + dir * traceLength, &cq, true)) {
+					const float traceLengthBefore = traceLength;
+					if (CCollisionHandler::DetectHit(u, u->GetTransformMatrix(true), pos, traceEnd, &cq, true)) {
 						const float len = cq.GetHitPosDist(pos, dir);
+						const bool accepted = (len < traceLength);
+
+						if (debugTraceRayFrame) {
+							const CollisionVolume& cv = u->collisionVolume;
+							const float3 hitPos = cq.GetHitPos();
+							const CMatrix44f transform = u->GetTransformMatrix(true);
+							const float3 unitFront = float3(u->frontdir.x, u->frontdir.y, u->frontdir.z);
+							const float3 unitRight = float3(u->rightdir.x, u->rightdir.y, u->rightdir.z);
+							const float3 unitUp = float3(u->updir.x, u->updir.y, u->updir.z);
+							const float3 unitRelMid = float3(u->relMidPos.x, u->relMidPos.y, u->relMidPos.z);
+							const float3 unitMid = float3(u->midPos.x, u->midPos.y, u->midPos.z);
+							const float3 unitAim = float3(u->aimPos.x, u->aimPos.y, u->aimPos.z);
+
+							LOG("[ReplayCheckpoint][traceray] unit-hit frame=%d owner=%d quad=%d candidate=%d accepted=%u prevLength=%.9g prevLengthBits=%08x len=%.9g lenBits=%08x pos=<%.9g,%.9g,%.9g> dir=<%.9g,%.9g,%.9g> hitPos=<%.9g,%.9g,%.9g> hitPosBits=<%08x,%08x,%08x> unitPos=<%.9g,%.9g,%.9g> unitFront=<%.9g,%.9g,%.9g> unitRight=<%.9g,%.9g,%.9g> unitUp=<%.9g,%.9g,%.9g> unitRelMid=<%.9g,%.9g,%.9g> unitMid=<%.9g,%.9g,%.9g> unitAim=<%.9g,%.9g,%.9g> heading=%d phys=%u coll=%u matrixX=<%.9g,%.9g,%.9g> matrixY=<%.9g,%.9g,%.9g> matrixZ=<%.9g,%.9g,%.9g> matrixPos=<%.9g,%.9g,%.9g> cvType=%d cvAxis=%d cvScales=<%.9g,%.9g,%.9g> cvHScales=<%.9g,%.9g,%.9g> cvOffsets=<%.9g,%.9g,%.9g> cvRadius=%.9g cvIgnore=%u cvCont=%u cvFoot=%u cvPiece=%u",
+								gs->frameNum,
+								owner != nullptr ? owner->id : -1,
+								quadIdx,
+								u->id,
+								accepted ? 1u : 0u,
+								traceLengthBefore,
+								ReplayCheckpointTraceRayFloatBits(traceLengthBefore),
+								len,
+								ReplayCheckpointTraceRayFloatBits(len),
+								pos.x, pos.y, pos.z,
+								dir.x, dir.y, dir.z,
+								hitPos.x, hitPos.y, hitPos.z,
+								ReplayCheckpointTraceRayFloatBits(hitPos.x),
+								ReplayCheckpointTraceRayFloatBits(hitPos.y),
+								ReplayCheckpointTraceRayFloatBits(hitPos.z),
+								u->pos.x, u->pos.y, u->pos.z,
+								unitFront.x, unitFront.y, unitFront.z,
+								unitRight.x, unitRight.y, unitRight.z,
+								unitUp.x, unitUp.y, unitUp.z,
+								unitRelMid.x, unitRelMid.y, unitRelMid.z,
+								unitMid.x, unitMid.y, unitMid.z,
+								unitAim.x, unitAim.y, unitAim.z,
+								static_cast<int>(u->heading),
+								static_cast<unsigned int>(u->physicalState),
+								static_cast<unsigned int>(u->collidableState),
+								transform.GetX().x, transform.GetX().y, transform.GetX().z,
+								transform.GetY().x, transform.GetY().y, transform.GetY().z,
+								transform.GetZ().x, transform.GetZ().y, transform.GetZ().z,
+								transform.GetPos().x, transform.GetPos().y, transform.GetPos().z,
+								cv.GetVolumeType(),
+								cv.GetPrimaryAxis(),
+								cv.GetScales().x, cv.GetScales().y, cv.GetScales().z,
+								cv.GetHScales().x, cv.GetHScales().y, cv.GetHScales().z,
+								cv.GetOffsets().x, cv.GetOffsets().y, cv.GetOffsets().z,
+								cv.GetBoundingRadius(),
+								cv.IgnoreHits() ? 1u : 0u,
+								cv.UseContHitTest() ? 1u : 0u,
+								cv.DefaultToFootPrint() ? 1u : 0u,
+								cv.DefaultToPieceTree() ? 1u : 0u);
+						}
 
 						// we want the closest unit (intersection point) on the ray
 						if (len >= traceLength)

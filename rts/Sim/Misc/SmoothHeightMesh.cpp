@@ -2,16 +2,21 @@
 
 #include <vector>
 #include <cassert>
+#include <cstdint>
 #include <limits>
 
 #include "SmoothHeightMesh.h"
 
+#include "Sim/Misc/GlobalSynced.h"
 #include "Map/Ground.h"
 #include "Map/ReadMap.h"
 #include "Sim/Misc/ModInfo.h"
+#include "System/Config/ConfigHandler.h"
 #include "System/float3.h"
 #include "System/Log/ILog.h"
 #include "System/SpringMath.h"
+#include "System/SpringHash.h"
+#include "System/Sync/SyncChecker.h"
 #include "System/TimeProfiler.h"
 #include "System/Threading/ThreadPool.h"
 #ifdef USING_CREG
@@ -78,6 +83,52 @@ static void SerializeReplayCheckpointVector(creg::ISerializer* s, std::vector<T>
 	valueType->Serialize(s, &value);
 }
 #endif
+
+template<typename T>
+static uint32_t ReplayCheckpointHashValue(uint32_t hash, const T& value)
+{
+	return spring::LiteHash(&value, sizeof(value), hash);
+}
+
+template<typename T>
+static uint32_t ReplayCheckpointHashVector(uint32_t hash, const std::vector<T>& values)
+{
+	const uint32_t size = static_cast<uint32_t>(values.size());
+	hash = ReplayCheckpointHashValue(hash, size);
+
+	if (!values.empty())
+		hash = spring::LiteHash(values.data(), values.size() * sizeof(T), hash);
+
+	return hash;
+}
+
+static uint32_t ReplayCheckpointHashBoolVector(uint32_t hash, const std::vector<bool>& values)
+{
+	const uint32_t size = static_cast<uint32_t>(values.size());
+	hash = ReplayCheckpointHashValue(hash, size);
+
+	for (const bool value: values) {
+		const uint8_t byteValue = value ? 1u : 0u;
+		hash = ReplayCheckpointHashValue(hash, byteValue);
+	}
+
+	return hash;
+}
+
+template<typename T>
+static uint32_t ReplayCheckpointHashQueue(uint32_t hash, const std::queue<T>& queue)
+{
+	std::queue<T> copy = queue;
+	const uint32_t size = static_cast<uint32_t>(copy.size());
+	hash = ReplayCheckpointHashValue(hash, size);
+
+	while (!copy.empty()) {
+		hash = ReplayCheckpointHashValue(hash, copy.front());
+		copy.pop();
+	}
+
+	return hash;
+}
 
 
 static float Interpolate(float x, float y, const int maxx, const int maxy, const float res, const float* heightmap)
@@ -484,6 +535,11 @@ void SmoothHeightMesh::MapChanged(int x1, int y1, int x2, int y2) {
 
 	if (!enabled) return;
 
+	if (replayCheckpointMapChangedSuppressedForLoad) {
+		replayCheckpointSuppressedMapChangeCount += 1;
+		return;
+	}
+
 	const bool queueWasEmpty = mapChangeTrack.damageQueue[mapChangeTrack.activeBuffer].empty();
 	const int res = resolution*SAMPLES_PER_QUAD;
 	const int w = mapChangeTrack.width;
@@ -726,6 +782,105 @@ void SmoothHeightMesh::SerializeReplayCheckpoint(creg::ISerializer* s)
 	SerializeReplayCheckpointValue(s, mapChangeTrack.queueReleaseOnFrame);
 	SerializeReplayCheckpointValue(s, mapChangeTrack.activeBuffer);
 #endif
+}
+
+void SmoothHeightMesh::SetReplayCheckpointMapChangedSuppressedForLoad(bool suppressed)
+{
+	if (replayCheckpointMapChangedSuppressedForLoad == suppressed)
+		return;
+
+	replayCheckpointMapChangedSuppressedForLoad = suppressed;
+
+	if (suppressed) {
+		replayCheckpointSuppressedMapChangeCount = 0;
+		return;
+	}
+
+	if (replayCheckpointSuppressedMapChangeCount == 0)
+		return;
+
+	LOG("[ReplayCheckpoint] suppressed %u smooth mesh map-change notifications during checkpoint load",
+		replayCheckpointSuppressedMapChangeCount
+	);
+	replayCheckpointSuppressedMapChangeCount = 0;
+}
+
+uint32_t SmoothHeightMesh::GetReplayCheckpointStateHash() const
+{
+	uint32_t hash = 0x51a7e001u;
+
+	hash = ReplayCheckpointHashValue(hash, enabled);
+	hash = ReplayCheckpointHashValue(hash, maxx);
+	hash = ReplayCheckpointHashValue(hash, maxy);
+	hash = ReplayCheckpointHashValue(hash, fmaxx);
+	hash = ReplayCheckpointHashValue(hash, fmaxy);
+	hash = ReplayCheckpointHashValue(hash, fresolution);
+	hash = ReplayCheckpointHashValue(hash, resolution);
+	hash = ReplayCheckpointHashValue(hash, smoothRadius);
+
+	hash = ReplayCheckpointHashVector(hash, maximaMesh);
+	hash = ReplayCheckpointHashVector(hash, mesh);
+	hash = ReplayCheckpointHashVector(hash, tempMesh);
+	hash = ReplayCheckpointHashVector(hash, origMesh);
+	hash = ReplayCheckpointHashVector(hash, colsMaxima);
+	hash = ReplayCheckpointHashVector(hash, maximaRows);
+
+	hash = ReplayCheckpointHashBoolVector(hash, mapChangeTrack.damageMap);
+	hash = ReplayCheckpointHashQueue(hash, mapChangeTrack.damageQueue[0]);
+	hash = ReplayCheckpointHashQueue(hash, mapChangeTrack.damageQueue[1]);
+	hash = ReplayCheckpointHashQueue(hash, mapChangeTrack.horizontalBlurQueue);
+	hash = ReplayCheckpointHashQueue(hash, mapChangeTrack.verticalBlurQueue);
+	hash = ReplayCheckpointHashValue(hash, mapChangeTrack.width);
+	hash = ReplayCheckpointHashValue(hash, mapChangeTrack.height);
+	hash = ReplayCheckpointHashValue(hash, mapChangeTrack.queueReleaseOnFrame);
+	hash = ReplayCheckpointHashValue(hash, mapChangeTrack.activeBuffer);
+
+	return hash;
+}
+
+void SmoothHeightMesh::LogReplayCheckpointStateSignature(const char* label) const
+{
+	if (configHandler == nullptr)
+		return;
+
+	const int debugFrame = configHandler->GetInt("ReplayCheckpointDebugSignatureFrame");
+
+	if (debugFrame < 0 || gs == nullptr || gs->frameNum != debugFrame)
+		return;
+
+	constexpr float sampleX = 3597.76221f;
+	constexpr float sampleZ = 1519.88770f;
+	const bool canSampleSmooth = enabled && !mesh.empty() && maxx > 0 && maxy > 0 && fresolution > 0.0f;
+	const float smoothSample = canSampleSmooth ? Interpolate(sampleX, sampleZ, maxx, maxy, fresolution, mesh.data()) : 0.0f;
+	const float realSample = (readMap != nullptr) ? CGround::GetHeightAboveWater(sampleX, sampleZ) : 0.0f;
+
+	LOG("[ReplayCheckpoint][smooth-sig] %s frame=%d sync=%08x hash=%08x enabled=%u dims=%d/%d res=%d/%g radius=%d active=%u release=%d queues=%u/%u/%u/%u damageMap=%u mesh=%u maxima=%u temp=%u orig=%u sample=<%.8g,%.8g> smooth=%.9g real=%.9g",
+		label,
+		gs->frameNum,
+		CSyncChecker::GetChecksum(),
+		GetReplayCheckpointStateHash(),
+		enabled ? 1u : 0u,
+		maxx,
+		maxy,
+		resolution,
+		fresolution,
+		smoothRadius,
+		mapChangeTrack.activeBuffer ? 1u : 0u,
+		mapChangeTrack.queueReleaseOnFrame,
+		static_cast<unsigned int>(mapChangeTrack.damageQueue[0].size()),
+		static_cast<unsigned int>(mapChangeTrack.damageQueue[1].size()),
+		static_cast<unsigned int>(mapChangeTrack.horizontalBlurQueue.size()),
+		static_cast<unsigned int>(mapChangeTrack.verticalBlurQueue.size()),
+		static_cast<unsigned int>(mapChangeTrack.damageMap.size()),
+		static_cast<unsigned int>(mesh.size()),
+		static_cast<unsigned int>(maximaMesh.size()),
+		static_cast<unsigned int>(tempMesh.size()),
+		static_cast<unsigned int>(origMesh.size()),
+		sampleX,
+		sampleZ,
+		smoothSample,
+		realSample
+	);
 }
 
 

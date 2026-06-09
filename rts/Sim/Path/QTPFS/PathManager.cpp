@@ -5,10 +5,15 @@
 #include <assert.h>
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cinttypes>
+#include <cstring>
 #include <deque>
 #include <functional>
+#include <limits>
+#include <unordered_map>
+#include <vector>
 
 #include "System/Threading/ThreadPool.h"
 #include "System/Threading/SpringThreading.h"
@@ -22,18 +27,22 @@
 #include "Game/LoadScreen.h"
 #include "Map/MapInfo.h"
 
+#include "Sim/Features/Feature.h"
+#include "Sim/Features/FeatureHandler.h"
 #include "Sim/Misc/GlobalSynced.h"
 #include "Sim/Misc/ModInfo.h"
 #include "Sim/Misc/TeamHandler.h"
 #include "Sim/MoveTypes/MoveDefHandler.h"
 #include "Sim/MoveTypes/MoveMath/MoveMath.h"
 #include "Sim/Objects/SolidObject.h"
+#include "Sim/Units/UnitHandler.h"
 #include "System/Config/ConfigHandler.h"
 #include "System/FileSystem/ArchiveScanner.h"
 #include "System/FileSystem/FileSystem.h"
 #include "System/Log/ILog.h"
 #include "System/Platform/Threading.h"
 #include "System/Rectangle.h"
+#include "System/SpringHash.h"
 #include "System/TimeProfiler.h"
 #include "System/StringUtil.h"
 #ifdef USING_CREG
@@ -170,6 +179,322 @@ namespace QTPFS {
 
 		return registry.try_get<UnsyncedIPath>(entityId);
 	};
+
+	CSolidObject* GetReplayCheckpointPathOwner(uint32_t ownerID)
+	{
+		if (CUnit* unit = unitHandler.GetUnit(ownerID); unit != nullptr)
+			return unit;
+
+		return featureHandler.GetFeature(ownerID);
+	}
+
+	bool HasReplayCheckpointKnownComponent(QTPFS::entity entityId, QTPFS::entity systemEntity)
+	{
+		if (!registry.valid(entityId))
+			return false;
+		if (entityId == systemEntity)
+			return true;
+		if (GetPath(entityId) != nullptr || GetSearch(entityId) != nullptr)
+			return true;
+
+		return registry.any_of<
+			SearchModeIPath,
+			PathIsDirty,
+			PathIsTemp,
+			PathIsToBeUpdated,
+			PathUpdatedCounterIncrease,
+			ProcessPath,
+			PathSearchRef,
+			PathRequeueSearch,
+			PathDelayedDelete,
+			SharedPathChain,
+			PartialSharedPathChain
+		>(entityId);
+	}
+
+	static bool ReplayCheckpointDebugQTPFSFrame()
+	{
+		const int debugFrame = configHandler->GetInt("ReplayCheckpointDebugSignatureFrame");
+		return (debugFrame >= 0 && gs != nullptr && gs->frameNum == debugFrame);
+	}
+
+	static bool ReplayCheckpointDebugQTPFSLifecycleFrame()
+	{
+		const int debugFrame = configHandler->GetInt("ReplayCheckpointDebugSignatureFrame");
+		return (debugFrame >= 0 && gs != nullptr && gs->frameNum >= (debugFrame - (GAME_SPEED * 2)) && gs->frameNum <= debugFrame);
+	}
+
+	static void LogReplayCheckpointQueueState(const char* label)
+	{
+		if (!ReplayCheckpointDebugQTPFSFrame())
+			return;
+
+		const auto pathSearchView = registry.view<PathSearch, ProcessPath>();
+		const auto allSearchView = registry.view<PathSearch>();
+		const auto pathSearchRefView = registry.view<PathSearchRef>();
+		unsigned int pathSearchCount = 0;
+		unsigned int allSearchCount = 0;
+		unsigned int pathSearchRefCount = 0;
+
+		for ([[maybe_unused]] auto entity: pathSearchView) {
+			++pathSearchCount;
+		}
+		for ([[maybe_unused]] auto entity: allSearchView) {
+			++allSearchCount;
+		}
+		for ([[maybe_unused]] auto entity: pathSearchRefView) {
+			++pathSearchRefCount;
+		}
+
+		LOG("[ReplayCheckpoint][qtpfs-queue] %s frame=%d search=%u process=%u refs=%u",
+			label,
+			gs->frameNum,
+			allSearchCount,
+			pathSearchCount,
+			pathSearchRefCount
+		);
+
+		unsigned int index = 0;
+		for (auto searchEntity: pathSearchView) {
+			if (index >= 12)
+				break;
+
+			const PathSearch& search = pathSearchView.get<PathSearch>(searchEntity);
+			const QTPFS::entity pathEntity = QTPFS::entity(search.GetID());
+			const PathSearchRef* searchRef = registry.try_get<PathSearchRef>(pathEntity);
+			const IPath* path = GetPath(pathEntity);
+
+			LOG("[ReplayCheckpoint][qtpfs-queue] %s frame=%d slot=%u search=%u path=%u owner=%d synced=%u raw=%u init=%u partial=%u ref=%u",
+				label,
+				gs->frameNum,
+				index,
+				static_cast<unsigned int>(entt::to_integral(searchEntity)),
+				static_cast<unsigned int>(entt::to_integral(pathEntity)),
+				path != nullptr && path->GetOwner() != nullptr ? path->GetOwner()->id : 0,
+				search.synced ? 1u : 0u,
+				search.rawPathCheck ? 1u : 0u,
+				search.initialized ? 1u : 0u,
+				search.allowPartialSearch ? 1u : 0u,
+				searchRef != nullptr ? 1u : 0u
+			);
+			++index;
+		}
+
+		if (pathSearchCount > 12) {
+			LOG("[ReplayCheckpoint][qtpfs-queue] %s frame=%d truncated=%u",
+				label,
+				gs->frameNum,
+				pathSearchCount - 12
+			);
+		}
+	}
+
+	static unsigned int GetReplayCheckpointPathOwnerID(const IPath* path)
+	{
+		if (path == nullptr || path->GetOwner() == nullptr)
+			return std::numeric_limits<unsigned int>::max();
+
+		return static_cast<unsigned int>(path->GetOwner()->id);
+	}
+
+	static int CompareReplayCheckpointFloat3(const float3& lhs, const float3& rhs)
+	{
+		if (lhs.x != rhs.x)
+			return (lhs.x < rhs.x) ? -1 : 1;
+		if (lhs.y != rhs.y)
+			return (lhs.y < rhs.y) ? -1 : 1;
+		if (lhs.z != rhs.z)
+			return (lhs.z < rhs.z) ? -1 : 1;
+
+		return 0;
+	}
+
+	static bool LessReplayCheckpointPathEntity(const QTPFS::entity lhs, const QTPFS::entity rhs)
+	{
+		if (lhs == rhs)
+			return false;
+
+		const IPath* lhsPath = GetPath(lhs);
+		const IPath* rhsPath = GetPath(rhs);
+
+		if (lhsPath == nullptr || rhsPath == nullptr) {
+			if (lhsPath != rhsPath)
+				return lhsPath != nullptr;
+
+			return entt::to_integral(lhs) < entt::to_integral(rhs);
+		}
+
+		const unsigned int lhsOwnerID = GetReplayCheckpointPathOwnerID(lhsPath);
+		const unsigned int rhsOwnerID = GetReplayCheckpointPathOwnerID(rhsPath);
+
+		if (lhsOwnerID != rhsOwnerID)
+			return lhsOwnerID < rhsOwnerID;
+		if (lhsPath->GetPathType() != rhsPath->GetPathType())
+			return lhsPath->GetPathType() < rhsPath->GetPathType();
+
+		if (const int sourceCmp = CompareReplayCheckpointFloat3(lhsPath->GetSourcePoint(), rhsPath->GetSourcePoint()); sourceCmp != 0)
+			return sourceCmp < 0;
+		if (const int targetCmp = CompareReplayCheckpointFloat3(lhsPath->GetTargetPoint(), rhsPath->GetTargetPoint()); targetCmp != 0)
+			return targetCmp < 0;
+		if (const int goalCmp = CompareReplayCheckpointFloat3(lhsPath->GetGoalPosition(), rhsPath->GetGoalPosition()); goalCmp != 0)
+			return goalCmp < 0;
+
+		if (lhsPath->NumPoints() != rhsPath->NumPoints())
+			return lhsPath->NumPoints() < rhsPath->NumPoints();
+		if (lhsPath->NumNodes() != rhsPath->NumNodes())
+			return lhsPath->NumNodes() < rhsPath->NumNodes();
+		if (lhsPath->GetNextPointIndex() != rhsPath->GetNextPointIndex())
+			return lhsPath->GetNextPointIndex() < rhsPath->GetNextPointIndex();
+
+		return entt::to_integral(lhs) < entt::to_integral(rhs);
+	}
+
+	static bool LessReplayCheckpointPathSearchEntity(const QTPFS::entity lhs, const QTPFS::entity rhs)
+	{
+		if (lhs == rhs)
+			return false;
+
+		const PathSearch* lhsSearch = GetSearch(lhs);
+		const PathSearch* rhsSearch = GetSearch(rhs);
+		const QTPFS::entity lhsPathEntity = (lhsSearch != nullptr) ? QTPFS::entity(lhsSearch->GetID()) : entt::null;
+		const QTPFS::entity rhsPathEntity = (rhsSearch != nullptr) ? QTPFS::entity(rhsSearch->GetID()) : entt::null;
+
+		if (LessReplayCheckpointPathEntity(lhsPathEntity, rhsPathEntity))
+			return true;
+		if (LessReplayCheckpointPathEntity(rhsPathEntity, lhsPathEntity))
+			return false;
+
+		return entt::to_integral(lhs) < entt::to_integral(rhs);
+	}
+
+	template<typename View, typename Compare>
+	static std::vector<QTPFS::entity> CollectReplayCheckpointSortedEntities(View&& view, Compare&& compare)
+	{
+		std::vector<QTPFS::entity> entities;
+
+		for (const QTPFS::entity entity: view) {
+			entities.push_back(entity);
+		}
+
+		std::sort(entities.begin(), entities.end(), compare);
+		return entities;
+	}
+
+	static void LogReplayCheckpointQueueSearch(const char* label, QTPFS::entity pathEntity, QTPFS::entity searchEntity)
+	{
+		if (!ReplayCheckpointDebugQTPFSFrame())
+			return;
+
+		const uint32_t pathID = entt::to_integral(pathEntity);
+		const uint32_t searchID = entt::to_integral(searchEntity);
+		const IPath* path = GetPath(pathEntity);
+		const PathSearchRef* searchRef = registry.try_get<PathSearchRef>(pathEntity);
+		const PathSearch* search = GetSearch(searchEntity);
+		const auto ownerID = (path != nullptr && path->GetOwner() != nullptr) ? path->GetOwner()->id : 0;
+
+		LOG("[ReplayCheckpoint][qtpfs-queue] %s frame=%d path=%u search=%u owner=%d syncedPath=%u syncedSearch=%u raw=%u partial=%u initialized=%u hasSearchRef=%u delayedDelete=%u searchMode=%u",
+			label,
+			gs->frameNum,
+			pathID,
+			searchID,
+			ownerID,
+			path != nullptr ? (path->IsSynced() ? 1u : 0u) : 2u,
+			search != nullptr ? (search->synced ? 1u : 0u) : 2u,
+			search != nullptr ? (search->rawPathCheck ? 1u : 0u) : 2u,
+			search != nullptr ? (search->allowPartialSearch ? 1u : 0u) : 2u,
+			search != nullptr ? (search->initialized ? 1u : 0u) : 2u,
+			searchRef != nullptr ? 1u : 0u,
+			registry.any_of<PathDelayedDelete>(pathEntity) ? 1u : 0u,
+			registry.any_of<SearchModeIPath>(pathEntity) ? 1u : 0u
+		);
+	}
+
+	static void SerializeBoolByte(creg::ISerializer* s, bool& value)
+	{
+		uint8_t storedValue = value ? 1u : 0u;
+		s->Serialize(storedValue);
+		if (!s->IsWriting())
+			value = (storedValue != 0u);
+	}
+
+	static void SerializeFloat3Value(creg::ISerializer* s, float3& value)
+	{
+		s->Serialize(&value, sizeof(value));
+	}
+
+	static void SerializeSpringTimeValue(creg::ISerializer* s, spring_time& value)
+	{
+		s->Serialize(&value, sizeof(value));
+	}
+
+	template<typename T>
+	static void SerializeReplayCheckpointVector(creg::ISerializer* s, std::vector<T>& value)
+	{
+		std::unique_ptr<creg::IType> valueType = creg::DeduceType<std::vector<T>>::Get();
+		valueType->Serialize(s, &value);
+	}
+
+	static void SerializeReplayCheckpointDeque(creg::ISerializer* s, std::deque<int>& value)
+	{
+		std::vector<int> storedValues;
+		if (s->IsWriting())
+			storedValues.assign(value.begin(), value.end());
+
+		SerializeReplayCheckpointVector(s, storedValues);
+
+		if (!s->IsWriting())
+			value.assign(storedValues.begin(), storedValues.end());
+	}
+
+	static void SerializeReplayCheckpointMapChangeTrack(creg::ISerializer* s, PathManager::MapChangeTrack& track)
+	{
+		SerializeReplayCheckpointVector(s, track.damageMap);
+		SerializeReplayCheckpointDeque(s, track.damageQueue);
+	}
+
+	static void SerializeReplayCheckpointNodeLayersChangeTrack(creg::ISerializer* s, PathManager::NodeLayersChangeTrack& track)
+	{
+		s->Serialize(track.width);
+		s->Serialize(track.height);
+		s->Serialize(track.cellSize);
+
+		uint32_t trackerCount = static_cast<uint32_t>(track.mapChangeTrackers.size());
+		s->Serialize(trackerCount);
+		if (!s->IsWriting())
+			track.mapChangeTrackers.resize(trackerCount);
+
+		for (PathManager::MapChangeTrack& tracker: track.mapChangeTrackers) {
+			SerializeReplayCheckpointMapChangeTrack(s, tracker);
+		}
+	}
+
+	static void SerializeReplayCheckpointDirtyPathDetail(creg::ISerializer* s, PathCache::DirtyPathDetail& detail)
+	{
+		s->Serialize(detail.pathEntity);
+		s->Serialize(detail.autoRepathTrigger);
+		s->Serialize(detail.nodesAreCleanFromNodeId);
+		SerializeBoolByte(s, detail.clearSharing);
+		SerializeBoolByte(s, detail.clearPath);
+	}
+
+	static void SerializeReplayCheckpointPathCache(creg::ISerializer* s, PathCache& cache)
+	{
+		uint32_t layerCount = static_cast<uint32_t>(cache.dirtyPaths.size());
+		s->Serialize(layerCount);
+		if (!s->IsWriting())
+			cache.dirtyPaths.resize(layerCount);
+
+		for (std::vector<PathCache::DirtyPathDetail>& layerDirtyPaths: cache.dirtyPaths) {
+			uint32_t detailCount = static_cast<uint32_t>(layerDirtyPaths.size());
+			s->Serialize(detailCount);
+			if (!s->IsWriting())
+				layerDirtyPaths.resize(detailCount);
+
+			for (PathCache::DirtyPathDetail& detail: layerDirtyPaths) {
+				SerializeReplayCheckpointDirtyPathDetail(s, detail);
+			}
+		}
+	}
 }
 
 QTPFS::PathManager::PathManager() {
@@ -319,7 +644,7 @@ void QTPFS::PathManager::ResetLivePathsForLoad()
 			replayCheckpointRegistryEntities.end(),
 			replayCheckpointRegistryReleased
 		);
-		systemEntity = replayCheckpointRegistryEntities[0];
+		systemEntity = QTPFS::entity(0);
 		assert(registry.valid(systemEntity));
 	} else {
 		systemEntity = registry.create();
@@ -338,20 +663,465 @@ void QTPFS::PathManager::ResetLivePathsForLoad()
 	);
 }
 
+void QTPFS::PathManager::RebuildReplayCheckpointNodeLayersForLoad()
+{
+	RECOIL_DETAILED_TRACY_ZONE;
+	assert(!ThreadPool::IsInMultiThreadedSection());
+
+	const int numMoveDefs = moveDefHandler.GetNumMoveDefs();
+	if (nodeLayers.size() != static_cast<std::size_t>(numMoveDefs)) {
+		LOG_L(L_WARNING,
+			"[ReplayCheckpoint] cannot rebuild QTPFS node layers for load: have %u layers, expected %d",
+			static_cast<unsigned int>(nodeLayers.size()),
+			numMoveDefs
+		);
+		return;
+	}
+
+	InitRootSize(MAP_RECTANGLE);
+
+	nodeLayerUpdatePriorityOrder.resize(numMoveDefs);
+	for (int i = 0; i < numMoveDefs; ++i) {
+		nodeLayerUpdatePriorityOrder[i] = i;
+	}
+	std::stable_sort(nodeLayerUpdatePriorityOrder.begin(), nodeLayerUpdatePriorityOrder.end(), [](int a, int b){
+		return (moveDefHandler.GetMoveDefByPathType(a)->xsize > moveDefHandler.GetMoveDefByPathType(b)->xsize);
+	});
+
+	nodeLayersMapDamageTrack.width = mapDims.mapx / DAMAGE_MAP_BLOCK_SIZE;
+	nodeLayersMapDamageTrack.height = mapDims.mapy / DAMAGE_MAP_BLOCK_SIZE;
+	nodeLayersMapDamageTrack.cellSize = DAMAGE_MAP_BLOCK_SIZE;
+	nodeLayersMapDamageTrack.mapChangeTrackers.clear();
+	nodeLayersMapDamageTrack.mapChangeTrackers.reserve(numMoveDefs);
+	for (int i = 0; i < numMoveDefs; ++i) {
+		MapChangeTrack newChangeTrack;
+		newChangeTrack.damageMap.resize(nodeLayersMapDamageTrack.width * nodeLayersMapDamageTrack.height);
+		nodeLayersMapDamageTrack.mapChangeTrackers.emplace_back(std::move(newChangeTrack));
+	}
+
+	InitNodeLayersThreaded(MAP_RECTANGLE, false);
+	PathSpeedModInfoSystem::Init();
+
+	pfsCheckSum = 0;
+	int maxAllocedNodes = 0;
+	for (unsigned int layerNum = 0; layerNum < nodeLayers.size(); layerNum++) {
+		auto& nodeLayer = nodeLayers[layerNum];
+		for (int i = 0; i < nodeLayer.GetRootNodeCount(); ++i) {
+			auto curRootNode = nodeLayer.GetPoolNode(i);
+			pfsCheckSum ^= curRootNode->GetCheckSum(nodeLayers[layerNum]);
+		}
+		maxAllocedNodes = std::max(nodeLayers[layerNum].GetMaxNodesAlloced(), maxAllocedNodes);
+	}
+
+	LOG("[ReplayCheckpoint] rebuilt QTPFS node layers for load: %u layers, maxAlloc=%d, pfs-checksum=%08x",
+		static_cast<unsigned int>(nodeLayers.size()),
+		maxAllocedNodes,
+		pfsCheckSum
+	);
+}
+
+void QTPFS::PathManager::CaptureReplayCheckpointPathStates()
+{
+	replayCheckpointPathStates.clear();
+
+	auto capturePathState = [this](auto entity) {
+		const IPath* path = GetPath(entity);
+		if (path == nullptr)
+			return;
+
+		ReplayCheckpointPathState state;
+		state.entity = entity;
+		state.hasOwner = (path->GetOwner() != nullptr);
+		state.ownerID = state.hasOwner ? static_cast<uint32_t>(path->GetOwner()->id) : 0u;
+		state.pathID = path->GetID();
+		state.nextPointIndex = path->GetNextPointIndex();
+		state.repathTriggerIndex = path->GetRepathTriggerIndex();
+		state.numPathUpdates = path->GetNumPathUpdates();
+		state.firstCleanNodeID = path->GetFirstNodeIdOfCleanPath();
+		state.hash = path->GetHash();
+		state.virtualHash = path->GetVirtualHash();
+		state.radius = path->GetRadius();
+		state.boundingBoxMins = path->GetBoundingBoxMins();
+		state.boundingBoxMaxs = path->GetBoundingBoxMaxs();
+		state.goalPosition = path->GetGoalPosition();
+		state.searchTime = path->GetSearchTime();
+		state.pathType = path->GetPathType();
+		state.synced = path->IsSynced();
+		state.fullPath = path->IsFullPath();
+		state.partialPath = path->IsPartialPath();
+		state.rawPath = path->IsRawPath();
+		state.boundingBoxOverride = path->IsBoundingBoxOverriden();
+		state.unsyncedPath = registry.any_of<UnsyncedIPath>(entity);
+		state.externalPath = registry.any_of<ExternallyManagedSyncedIPath>(entity);
+		state.dirty = registry.any_of<PathIsDirty>(entity);
+		state.temp = registry.any_of<PathIsTemp>(entity);
+		state.toBeUpdated = registry.any_of<PathIsToBeUpdated>(entity);
+		state.updatedCounterIncrease = registry.any_of<PathUpdatedCounterIncrease>(entity);
+		state.requeueSearch = registry.any_of<PathRequeueSearch>(entity);
+		state.requeueSearchValue = state.requeueSearch && registry.get<PathRequeueSearch>(entity).value;
+		state.searchModePath = registry.any_of<SearchModeIPath>(entity);
+		state.delayedDelete = registry.any_of<PathDelayedDelete>(entity);
+		state.delayedDeleteFrame = state.delayedDelete ? registry.get<PathDelayedDelete>(entity).value : 0;
+		state.sharedPathChain = registry.any_of<SharedPathChain>(entity);
+		if (state.sharedPathChain) {
+			const SharedPathChain& chain = registry.get<SharedPathChain>(entity);
+			state.sharedPrev = chain.prev;
+			state.sharedNext = chain.next;
+			const SharedPathMapIt sharedIt = sharedPaths.find(path->GetHash());
+			state.sharedPathHead = (sharedIt != sharedPaths.end() && sharedIt->second == entity);
+		}
+		state.partialSharedPathChain = registry.any_of<PartialSharedPathChain>(entity);
+		if (state.partialSharedPathChain) {
+			const PartialSharedPathChain& chain = registry.get<PartialSharedPathChain>(entity);
+			state.partialSharedPrev = chain.prev;
+			state.partialSharedNext = chain.next;
+			const PartialSharedPathMapIt partialIt = partialSharedPaths.find(path->GetVirtualHash());
+			state.partialSharedPathHead = (partialIt != partialSharedPaths.end() && partialIt->second == entity);
+		}
+
+		state.points.reserve(path->NumPoints());
+		for (unsigned int i = 0; i < path->NumPoints(); ++i) {
+			state.points.push_back(path->GetPoint(i));
+		}
+
+		const unsigned int nodeCount = path->NumNodes();
+		state.nodes.reserve(nodeCount);
+		for (unsigned int i = 0; i < nodeCount; ++i) {
+			const IPath::PathNodeData& node = path->GetNode(i);
+			state.nodes.push_back({
+				node.nodeId,
+				node.nodeNumber,
+				node.netPoint,
+				node.pathPointIndex,
+				node.xmin,
+				node.zmin,
+				node.xmax,
+				node.zmax,
+				node.badNode
+			});
+		}
+
+		replayCheckpointPathStates.push_back(std::move(state));
+	};
+
+	auto syncedPathView = registry.view<IPath>();
+	for (auto entity: syncedPathView) {
+		capturePathState(entity);
+	}
+
+	auto unsyncedPathView = registry.view<UnsyncedIPath>();
+	for (auto entity: unsyncedPathView) {
+		capturePathState(entity);
+	}
+
+	auto externalPathView = registry.view<ExternallyManagedSyncedIPath>();
+	for (auto entity: externalPathView) {
+		capturePathState(entity);
+	}
+}
+
+void QTPFS::PathManager::CaptureReplayCheckpointEmptyEntities()
+{
+	replayCheckpointEmptyEntities.clear();
+
+	registry.each([this](auto entity) {
+		if (!HasReplayCheckpointKnownComponent(entity, systemEntity))
+			replayCheckpointEmptyEntities.push_back(entity);
+	});
+
+	std::sort(replayCheckpointEmptyEntities.begin(), replayCheckpointEmptyEntities.end(), [](const QTPFS::entity lhs, const QTPFS::entity rhs) {
+		return entt::to_integral(lhs) < entt::to_integral(rhs);
+	});
+}
+
+void QTPFS::PathManager::SerializeReplayCheckpointPathState(creg::ISerializer* s, ReplayCheckpointPathState& state)
+{
+	s->Serialize(state.entity);
+	SerializeBoolByte(s, state.hasOwner);
+	s->Serialize(state.ownerID);
+	s->Serialize(state.pathID);
+	s->Serialize(state.nextPointIndex);
+	s->Serialize(state.repathTriggerIndex);
+	s->Serialize(state.numPathUpdates);
+	s->Serialize(state.firstCleanNodeID);
+	s->Serialize(state.hash);
+	s->Serialize(state.virtualHash);
+	s->Serialize(state.radius);
+	SerializeFloat3Value(s, state.boundingBoxMins);
+	SerializeFloat3Value(s, state.boundingBoxMaxs);
+	SerializeFloat3Value(s, state.goalPosition);
+	SerializeSpringTimeValue(s, state.searchTime);
+	s->Serialize(state.pathType);
+	SerializeBoolByte(s, state.synced);
+	SerializeBoolByte(s, state.fullPath);
+	SerializeBoolByte(s, state.partialPath);
+	SerializeBoolByte(s, state.rawPath);
+	SerializeBoolByte(s, state.boundingBoxOverride);
+	SerializeBoolByte(s, state.unsyncedPath);
+	SerializeBoolByte(s, state.externalPath);
+	SerializeBoolByte(s, state.dirty);
+	SerializeBoolByte(s, state.temp);
+	SerializeBoolByte(s, state.toBeUpdated);
+	SerializeBoolByte(s, state.updatedCounterIncrease);
+	SerializeBoolByte(s, state.requeueSearch);
+	SerializeBoolByte(s, state.requeueSearchValue);
+	SerializeBoolByte(s, state.searchModePath);
+	SerializeBoolByte(s, state.delayedDelete);
+	s->Serialize(state.delayedDeleteFrame);
+	SerializeBoolByte(s, state.sharedPathChain);
+	SerializeBoolByte(s, state.sharedPathHead);
+	s->Serialize(state.sharedPrev);
+	s->Serialize(state.sharedNext);
+	SerializeBoolByte(s, state.partialSharedPathChain);
+	SerializeBoolByte(s, state.partialSharedPathHead);
+	s->Serialize(state.partialSharedPrev);
+	s->Serialize(state.partialSharedNext);
+
+	uint32_t pointCount = static_cast<uint32_t>(state.points.size());
+	s->Serialize(pointCount);
+	if (!s->IsWriting())
+		state.points.resize(pointCount);
+	for (float3& point: state.points) {
+		SerializeFloat3Value(s, point);
+	}
+
+	uint32_t nodeCount = static_cast<uint32_t>(state.nodes.size());
+	s->Serialize(nodeCount);
+	if (!s->IsWriting())
+		state.nodes.resize(nodeCount);
+	for (ReplayCheckpointPathNodeState& node: state.nodes) {
+		s->Serialize(node.nodeId);
+		s->Serialize(node.nodeNumber);
+		s->Serialize(&node.netPoint, sizeof(node.netPoint));
+		s->Serialize(node.pathPointIndex);
+		s->Serialize(node.xmin);
+		s->Serialize(node.zmin);
+		s->Serialize(node.xmax);
+		s->Serialize(node.zmax);
+		SerializeBoolByte(s, node.badNode);
+	}
+}
+
+void QTPFS::PathManager::PruneReplayCheckpointExtraEmptyEntities()
+{
+	std::vector<QTPFS::entity> extraEmptyEntities;
+
+	registry.each([this, &extraEmptyEntities](auto entity) {
+		if (HasReplayCheckpointKnownComponent(entity, systemEntity))
+			return;
+		if (std::find(replayCheckpointEmptyEntities.begin(), replayCheckpointEmptyEntities.end(), entity) != replayCheckpointEmptyEntities.end())
+			return;
+
+		extraEmptyEntities.push_back(entity);
+	});
+
+	for (const QTPFS::entity entity: extraEmptyEntities) {
+		if (registry.valid(entity))
+			registry.destroy(entity);
+	}
+
+	if (!extraEmptyEntities.empty()) {
+		LOG("[ReplayCheckpoint] pruned %u extra empty QTPFS registry entities after load",
+			static_cast<unsigned int>(extraEmptyEntities.size())
+		);
+	}
+}
+
+void QTPFS::PathManager::RestoreReplayCheckpointSharedPathCaches()
+{
+	sharedPaths.clear();
+	partialSharedPaths.clear();
+
+	for (const ReplayCheckpointPathState& state: replayCheckpointPathStates) {
+		IPath* path = GetPath(state.entity);
+		if (path == nullptr)
+			continue;
+
+		if (state.sharedPathChain) {
+			registry.emplace_or_replace<SharedPathChain>(state.entity, state.sharedPrev, state.sharedNext);
+			if (state.sharedPathHead)
+				sharedPaths[path->GetHash()] = state.entity;
+		}
+
+		if (state.partialSharedPathChain) {
+			registry.emplace_or_replace<PartialSharedPathChain>(state.entity, state.partialSharedPrev, state.partialSharedNext);
+			if (state.partialSharedPathHead)
+				partialSharedPaths[path->GetVirtualHash()] = state.entity;
+		}
+	}
+}
+
+void QTPFS::PathManager::RestoreReplayCheckpointPathComponentOrder()
+{
+	std::unordered_map<uint32_t, uint32_t> pathOrder;
+	pathOrder.reserve(replayCheckpointPathStates.size());
+
+	for (uint32_t order = 0; order < replayCheckpointPathStates.size(); ++order) {
+		pathOrder.emplace(static_cast<uint32_t>(entt::to_integral(replayCheckpointPathStates[order].entity)), order);
+	}
+
+	auto rankPathEntity = [&pathOrder](const QTPFS::entity entity) {
+		const uint32_t entityID = static_cast<uint32_t>(entt::to_integral(entity));
+		const auto it = pathOrder.find(entityID);
+		return (it != pathOrder.end()) ? it->second : static_cast<uint32_t>(pathOrder.size());
+	};
+	auto comparePathEntity = [&rankPathEntity](const QTPFS::entity lhs, const QTPFS::entity rhs) {
+		const uint32_t lhsRank = rankPathEntity(lhs);
+		const uint32_t rhsRank = rankPathEntity(rhs);
+
+		if (lhsRank != rhsRank)
+			return lhsRank < rhsRank;
+
+		return entt::to_integral(lhs) < entt::to_integral(rhs);
+	};
+
+	registry.sort<IPath>(comparePathEntity);
+	registry.sort<UnsyncedIPath>(comparePathEntity);
+	registry.sort<ExternallyManagedSyncedIPath>(comparePathEntity);
+	registry.sort<PathIsTemp>(comparePathEntity);
+	registry.sort<PathIsDirty>(comparePathEntity);
+	registry.sort<PathIsToBeUpdated>(comparePathEntity);
+	registry.sort<PathUpdatedCounterIncrease>(comparePathEntity);
+	registry.sort<PathRequeueSearch>(comparePathEntity);
+	registry.sort<SearchModeIPath>(comparePathEntity);
+	registry.sort<PathDelayedDelete>(comparePathEntity);
+	registry.sort<SharedPathChain>(comparePathEntity);
+	registry.sort<PartialSharedPathChain>(comparePathEntity);
+}
+
+bool QTPFS::PathManager::RestoreReplayCheckpointPathsForLoad()
+{
+	RECOIL_DETAILED_TRACY_ZONE;
+
+	if (!replayCheckpointPathStatesLoaded || replayCheckpointPathStates.empty())
+		return false;
+
+	unsigned int restoredPaths = 0;
+	unsigned int restoredOwners = 0;
+	unsigned int restoredTempPaths = 0;
+	unsigned int restoredDirtyPaths = 0;
+	unsigned int restoredRequeuePaths = 0;
+
+	for (const ReplayCheckpointPathState& state: replayCheckpointPathStates) {
+		if (!registry.valid(state.entity))
+			[[maybe_unused]] const QTPFS::entity createdEntity = registry.create(state.entity);
+
+		IPath* path = nullptr;
+		if (state.unsyncedPath) {
+			path = &registry.emplace_or_replace<UnsyncedIPath>(state.entity);
+		} else if (state.externalPath) {
+			path = &registry.emplace_or_replace<ExternallyManagedSyncedIPath>(state.entity);
+		} else {
+			path = &registry.emplace_or_replace<IPath>(state.entity);
+		}
+
+		CSolidObject* owner = state.hasOwner ? GetReplayCheckpointPathOwner(state.ownerID) : nullptr;
+
+		path->SetID(state.pathID);
+		path->SetPathType(state.pathType);
+		path->SetNextPointIndex(state.nextPointIndex);
+		path->SetRepathTriggerIndex(state.repathTriggerIndex);
+		path->SetNumPathUpdates(state.numPathUpdates);
+		path->SetFirstNodeIdOfCleanPath(state.firstCleanNodeID);
+		path->SetHash(state.hash);
+		path->SetVirtualHash(state.virtualHash);
+		path->SetRadius(state.radius);
+		path->SetSynced(state.synced);
+		path->SetHasFullPath(state.fullPath);
+		path->SetHasPartialPath(state.partialPath);
+		path->SetIsRawPath(state.rawPath);
+		path->AllocPoints(state.points.size());
+		for (unsigned int i = 0; i < state.points.size(); ++i) {
+			path->SetPoint(i, state.points[i]);
+		}
+		path->AllocNodes(state.nodes.size());
+		for (unsigned int i = 0; i < state.nodes.size(); ++i) {
+			const ReplayCheckpointPathNodeState& node = state.nodes[i];
+			path->SetNode(i, node.nodeId, node.nodeNumber, float2{node.netPoint.x, node.netPoint.y}, node.pathPointIndex, node.badNode);
+			path->SetNodeBoundary(i, node.xmin, node.zmin, node.xmax, node.zmax);
+		}
+		path->SetOwner(owner);
+		path->SetGoalPosition(state.goalPosition);
+		path->SetSearchTime(state.searchTime);
+		path->RestoreBoundingBoxState(state.boundingBoxMins, state.boundingBoxMaxs, state.boundingBoxOverride);
+
+		if (state.dirty) {
+			registry.emplace_or_replace<PathIsDirty>(state.entity);
+			++restoredDirtyPaths;
+		}
+		if (state.temp) {
+			registry.emplace_or_replace<PathIsTemp>(state.entity);
+			++restoredTempPaths;
+		}
+		if (state.toBeUpdated)
+			registry.emplace_or_replace<PathIsToBeUpdated>(state.entity);
+		if (state.updatedCounterIncrease)
+			registry.emplace_or_replace<PathUpdatedCounterIncrease>(state.entity);
+		if (state.requeueSearch) {
+			registry.emplace_or_replace<PathRequeueSearch>(state.entity, state.requeueSearchValue);
+			++restoredRequeuePaths;
+		}
+		if (state.searchModePath) {
+			SearchModeIPath& searchPath = registry.emplace_or_replace<SearchModeIPath>(state.entity);
+			static_cast<IPath&>(searchPath) = *path;
+		}
+		if (state.delayedDelete)
+			registry.emplace_or_replace<PathDelayedDelete>(state.entity, state.delayedDeleteFrame);
+
+		++restoredPaths;
+		restoredOwners += (owner != nullptr);
+	}
+
+	RestoreReplayCheckpointSharedPathCaches();
+	RestoreReplayCheckpointPathComponentOrder();
+	PruneReplayCheckpointExtraEmptyEntities();
+	RestoreReplayCheckpointPathAllocator();
+
+	LOG("[ReplayCheckpoint] restored QTPFS path state for load: %u paths, %u owners, %u temp, %u dirty, %u requeue",
+		restoredPaths,
+		restoredOwners,
+		restoredTempPaths,
+		restoredDirtyPaths,
+		restoredRequeuePaths
+	);
+
+	return true;
+}
+
 void QTPFS::PathManager::SerializeReplayCheckpointState(creg::ISerializer* s)
 {
 #ifdef USING_CREG
 	if (s->IsWriting()) {
 		replayCheckpointRegistryEntities.assign(registry.data(), registry.data() + registry.size());
 		replayCheckpointRegistryReleased = registry.released();
+		CaptureReplayCheckpointPathStates();
+		CaptureReplayCheckpointEmptyEntities();
 	}
 
 	std::unique_ptr<creg::IType> entitiesType = creg::DeduceType<decltype(replayCheckpointRegistryEntities)>::Get();
 	entitiesType->Serialize(s, &replayCheckpointRegistryEntities);
 	s->Serialize(&replayCheckpointRegistryReleased, sizeof(replayCheckpointRegistryReleased));
 
+	std::unique_ptr<creg::IType> emptyEntitiesType = creg::DeduceType<decltype(replayCheckpointEmptyEntities)>::Get();
+	emptyEntitiesType->Serialize(s, &replayCheckpointEmptyEntities);
+
+	uint32_t pathStateCount = static_cast<uint32_t>(replayCheckpointPathStates.size());
+	s->Serialize(pathStateCount);
+	if (!s->IsWriting())
+		replayCheckpointPathStates.resize(pathStateCount);
+	for (ReplayCheckpointPathState& pathState: replayCheckpointPathStates) {
+		SerializeReplayCheckpointPathState(s, pathState);
+	}
+
+	SerializeReplayCheckpointNodeLayersChangeTrack(s, nodeLayersMapDamageTrack);
+	SerializeReplayCheckpointPathCache(s, pathCache);
+	s->Serialize(refreshDirtyPathRateFrame);
+	s->Serialize(updateDirtyPathRate);
+	s->Serialize(updateDirtyPathRemainder);
+
 	if (!s->IsWriting()) {
 		replayCheckpointRegistryLoaded = true;
+		replayCheckpointPathStatesLoaded = !replayCheckpointPathStates.empty();
 	}
 #endif
 }
@@ -369,7 +1139,8 @@ void QTPFS::PathManager::RestoreReplayCheckpointPathAllocator()
 	});
 
 	if (liveSearches != 0) {
-		LOG_L(L_WARNING, "[ReplayCheckpoint] restoring QTPFS allocator with %u live path searches", liveSearches);
+		LOG_L(L_WARNING, "[ReplayCheckpoint] skipped QTPFS allocator restore with %u live path searches", liveSearches);
+		return;
 	}
 
 	registry.assign_preserving_alive(
@@ -377,9 +1148,391 @@ void QTPFS::PathManager::RestoreReplayCheckpointPathAllocator()
 		replayCheckpointRegistryEntities.end(),
 		replayCheckpointRegistryReleased
 	);
-	systemEntity = replayCheckpointRegistryEntities[0];
+	systemEntity = QTPFS::entity(0);
 	assert(registry.valid(systemEntity));
 	assert(entt::to_entity(systemEntity) == 0);
+}
+
+void QTPFS::PathManager::NormalizePathAllocatorFreeList()
+{
+	using EntityTraits = entt::entt_traits<QTPFS::entity>;
+
+	const auto entityCount = registry.size();
+	if (entityCount == 0)
+		return;
+
+	std::vector<QTPFS::entity> entities(registry.data(), registry.data() + entityCount);
+	std::vector<std::size_t> releasedEntities;
+	releasedEntities.reserve(entityCount);
+
+	for (std::size_t index = 0; index < entityCount; ++index) {
+		const QTPFS::entity entity = entities[index];
+		const bool liveEntity =
+			static_cast<std::size_t>(entt::to_entity(entity)) == index &&
+			registry.valid(entity);
+
+		if (!liveEntity)
+			releasedEntities.push_back(index);
+	}
+
+	QTPFS::entity freeList = entt::tombstone;
+	const QTPFS::entity tombstoneEntity = entt::tombstone;
+
+	for (auto it = releasedEntities.rbegin(); it != releasedEntities.rend(); ++it) {
+		const std::size_t index = *it;
+		const QTPFS::entity entity = entities[index];
+		const auto version = entt::to_version(entity);
+
+		entities[index] = EntityTraits::construct(EntityTraits::to_integral(freeList), version);
+		freeList = EntityTraits::combine(
+			static_cast<EntityTraits::entity_type>(index),
+			EntityTraits::to_integral(tombstoneEntity)
+		);
+	}
+
+	registry.assign_preserving_alive(entities.begin(), entities.end(), freeList);
+}
+
+static uint32_t ReplayCheckpointPathHashUInt(uint32_t hash, uint32_t value)
+{
+	return spring::LiteHash(&value, sizeof(value), hash);
+}
+
+static uint32_t ReplayCheckpointPathHashFloat3(uint32_t hash, const float3& value)
+{
+	hash = spring::LiteHash(&value.x, sizeof(value.x), hash);
+	hash = spring::LiteHash(&value.y, sizeof(value.y), hash);
+	hash = spring::LiteHash(&value.z, sizeof(value.z), hash);
+	return hash;
+}
+
+static uint32_t ReplayCheckpointPathHashPathHash(uint32_t hash, const QTPFS::PathHashType& value)
+{
+	return spring::LiteHash(&value, sizeof(value), hash);
+}
+
+static uint32_t ReplayCheckpointPathHashUInt64(uint32_t hash, uint64_t value)
+{
+	return spring::LiteHash(&value, sizeof(value), hash);
+}
+
+struct ReplayCheckpointRegistrySignature {
+	uint32_t entityTableHash = 0x2f4d12a1u;
+	uint32_t freeListHash = 0x72e43c19u;
+	uint32_t freeListCount = 0u;
+	uint32_t freeListComplete = 1u;
+};
+
+static ReplayCheckpointRegistrySignature GetReplayCheckpointRegistrySignature()
+{
+	ReplayCheckpointRegistrySignature signature;
+	const QTPFS::entity* entities = QTPFS::registry.data();
+	const auto entityCount = QTPFS::registry.size();
+
+	for (std::size_t index = 0; index < entityCount; ++index) {
+		signature.entityTableHash = ReplayCheckpointPathHashUInt(
+			signature.entityTableHash,
+			static_cast<uint32_t>(entt::to_integral(entities[index]))
+		);
+	}
+
+	for (QTPFS::entity entity = QTPFS::registry.released(); entity != entt::null; ) {
+		const auto index = static_cast<std::size_t>(entt::to_entity(entity));
+		if (index >= entityCount || signature.freeListCount > entityCount) {
+			signature.freeListComplete = 0u;
+			break;
+		}
+
+		signature.freeListHash = ReplayCheckpointPathHashUInt(
+			signature.freeListHash,
+			static_cast<uint32_t>(entt::to_integral(entity))
+		);
+		++signature.freeListCount;
+		entity = entities[index];
+	}
+
+	return signature;
+}
+
+void QTPFS::PathManager::LogReplayCheckpointStateSignature(const char* label) const
+{
+	const int debugFrame = configHandler->GetInt("ReplayCheckpointDebugSignatureFrame");
+
+	if (debugFrame < 0 || gs == nullptr || gs->frameNum != debugFrame)
+		return;
+
+	uint32_t pathHash = 0x4f1bbcdcu;
+	uint32_t searchHash = 0x8d12f3abu;
+	unsigned int pathCount = 0;
+	unsigned int unsyncedPathCount = 0;
+	unsigned int externalPathCount = 0;
+	unsigned int searchCount = 0;
+	unsigned int dirtyPathCount = 0;
+	unsigned int tempPathCount = 0;
+	unsigned int updatePathCount = 0;
+	unsigned int requeuePathCount = 0;
+	unsigned int searchRefCount = 0;
+	unsigned int searchModePathCount = 0;
+	unsigned int delayedDeletePathCount = 0;
+	unsigned int sharedPathChainCount = 0;
+	unsigned int partialSharedPathChainCount = 0;
+	unsigned int nonPathEntityCount = 0;
+	unsigned int emptyEntityCount = 0;
+
+	registry.each([&](auto entity) {
+		const uint32_t entityID = static_cast<uint32_t>(entt::to_integral(entity));
+		const IPath* path = registry.try_get<IPath>(entity);
+		const bool hasSearch = registry.any_of<PathSearch, UnsyncedPathSearch, ExternallyManagedPathSearch>(entity);
+
+		if (path != nullptr) {
+			++pathCount;
+			pathHash = ReplayCheckpointPathHashUInt(pathHash, entityID);
+			pathHash = ReplayCheckpointPathHashUInt(pathHash, path->GetID());
+			pathHash = ReplayCheckpointPathHashUInt(pathHash, static_cast<uint32_t>(path->GetPathType()));
+			pathHash = ReplayCheckpointPathHashUInt(pathHash, path->GetNextPointIndex());
+			pathHash = ReplayCheckpointPathHashUInt(pathHash, path->GetRepathTriggerIndex());
+			pathHash = ReplayCheckpointPathHashUInt(pathHash, path->GetNumPathUpdates());
+			pathHash = ReplayCheckpointPathHashUInt(pathHash, path->GetFirstNodeIdOfCleanPath());
+			pathHash = ReplayCheckpointPathHashPathHash(pathHash, path->GetHash());
+			pathHash = ReplayCheckpointPathHashPathHash(pathHash, path->GetVirtualHash());
+			pathHash = ReplayCheckpointPathHashUInt(pathHash, path->CalculateHash());
+			pathHash = ReplayCheckpointPathHashUInt(pathHash, path->NumPoints());
+			pathHash = ReplayCheckpointPathHashUInt(pathHash, path->NumNodes());
+			pathHash = ReplayCheckpointPathHashUInt(pathHash, path->IsSynced() ? 1u : 0u);
+			pathHash = ReplayCheckpointPathHashUInt(pathHash, path->IsFullPath() ? 1u : 0u);
+			pathHash = ReplayCheckpointPathHashUInt(pathHash, path->IsPartialPath() ? 1u : 0u);
+			pathHash = ReplayCheckpointPathHashUInt(pathHash, path->IsRawPath() ? 1u : 0u);
+			pathHash = ReplayCheckpointPathHashFloat3(pathHash, path->GetGoalPosition());
+			pathHash = ReplayCheckpointPathHashFloat3(pathHash, path->GetBoundingBoxMins());
+			pathHash = ReplayCheckpointPathHashFloat3(pathHash, path->GetBoundingBoxMaxs());
+
+			const CSolidObject* owner = path->GetOwner();
+			pathHash = ReplayCheckpointPathHashUInt(pathHash, owner != nullptr ? static_cast<uint32_t>(owner->id) : 0u);
+
+			const SharedPathChain* sharedChain = registry.try_get<SharedPathChain>(entity);
+			const PartialSharedPathChain* partialChain = registry.try_get<PartialSharedPathChain>(entity);
+			const auto sharedIt = sharedPaths.find(path->GetHash());
+			const auto partialIt = partialSharedPaths.find(path->GetVirtualHash());
+			const uint32_t sharedHead = (sharedIt != sharedPaths.end() && sharedIt->second == entity) ? 1u : 0u;
+			const uint32_t partialHead = (partialIt != partialSharedPaths.end() && partialIt->second == entity) ? 1u : 0u;
+
+			pathHash = ReplayCheckpointPathHashUInt(pathHash, sharedChain != nullptr ? static_cast<uint32_t>(entt::to_integral(sharedChain->prev)) : 0u);
+			pathHash = ReplayCheckpointPathHashUInt(pathHash, sharedChain != nullptr ? static_cast<uint32_t>(entt::to_integral(sharedChain->next)) : 0u);
+			pathHash = ReplayCheckpointPathHashUInt(pathHash, sharedHead);
+			pathHash = ReplayCheckpointPathHashUInt(pathHash, partialChain != nullptr ? static_cast<uint32_t>(entt::to_integral(partialChain->prev)) : 0u);
+			pathHash = ReplayCheckpointPathHashUInt(pathHash, partialChain != nullptr ? static_cast<uint32_t>(entt::to_integral(partialChain->next)) : 0u);
+			pathHash = ReplayCheckpointPathHashUInt(pathHash, partialHead);
+		}
+
+		unsyncedPathCount += registry.any_of<UnsyncedIPath>(entity);
+		externalPathCount += registry.any_of<ExternallyManagedSyncedIPath>(entity);
+		searchCount += hasSearch;
+		dirtyPathCount += registry.any_of<PathIsDirty>(entity);
+		tempPathCount += registry.any_of<PathIsTemp>(entity);
+		updatePathCount += registry.any_of<PathIsToBeUpdated>(entity);
+		requeuePathCount += registry.any_of<PathRequeueSearch>(entity);
+		searchRefCount += registry.any_of<PathSearchRef>(entity);
+		searchModePathCount += registry.any_of<SearchModeIPath>(entity);
+		delayedDeletePathCount += registry.any_of<PathDelayedDelete>(entity);
+		sharedPathChainCount += registry.any_of<SharedPathChain>(entity);
+		partialSharedPathChainCount += registry.any_of<PartialSharedPathChain>(entity);
+
+		if (hasSearch)
+			searchHash = ReplayCheckpointPathHashUInt(searchHash, entityID);
+
+		if (path == nullptr && !hasSearch)
+			++nonPathEntityCount;
+		if (!HasReplayCheckpointKnownComponent(entity, systemEntity))
+			++emptyEntityCount;
+	});
+
+	const ReplayCheckpointRegistrySignature registrySignature = GetReplayCheckpointRegistrySignature();
+
+	LOG("[ReplayCheckpoint][qtpfs-sig] %s frame=%d live=%u size=%u released=%u freeCount=%u freeComplete=%u entityTableHash=%08x freeHash=%08x paths=%u nonPath=%u empty=%u unsyncedPaths=%u externalPaths=%u searches=%u dirty=%u temp=%u update=%u requeue=%u searchRefs=%u searchMode=%u delayedDelete=%u sharedChains=%u partialChains=%u pathHash=%08x searchHash=%08x",
+		label,
+		gs->frameNum,
+		static_cast<unsigned int>(registry.alive()),
+		static_cast<unsigned int>(registry.size()),
+		static_cast<unsigned int>(entt::to_integral(registry.released())),
+		registrySignature.freeListCount,
+		registrySignature.freeListComplete,
+		registrySignature.entityTableHash,
+		registrySignature.freeListHash,
+		pathCount,
+		nonPathEntityCount,
+		emptyEntityCount,
+		unsyncedPathCount,
+		externalPathCount,
+		searchCount,
+		dirtyPathCount,
+		tempPathCount,
+		updatePathCount,
+		requeuePathCount,
+		searchRefCount,
+		searchModePathCount,
+		delayedDeletePathCount,
+		sharedPathChainCount,
+		partialSharedPathChainCount,
+		pathHash,
+		searchHash
+	);
+
+	for (const NodeLayer& nodeLayer: nodeLayers) {
+		uint32_t layerHash = 0xa17e4b29u;
+
+		for (int rootIndex = 0; rootIndex < nodeLayer.GetRootNodeCount(); ++rootIndex) {
+			const INode* rootNode = nodeLayer.GetPoolNode(rootIndex);
+			const uint64_t rootChecksum = rootNode->GetCheckSum(nodeLayer);
+			layerHash = ReplayCheckpointPathHashUInt64(layerHash, rootChecksum);
+		}
+
+		LOG("[ReplayCheckpoint][qtpfs-layer] %s frame=%d type=%d roots=%u nodes=%u maxAlloc=%u leaf=%u open=%u closed=%u rootMask=%08x layerHash=%08x",
+			label,
+			gs->frameNum,
+			nodeLayer.GetNodelayer(),
+			static_cast<unsigned int>(nodeLayer.GetRootNodeCount()),
+			static_cast<unsigned int>(nodeLayer.GetNodeCount()),
+			static_cast<unsigned int>(nodeLayer.GetMaxNodesAlloced()),
+			nodeLayer.GetNumLeafNodes(),
+			nodeLayer.GetNumOpenNodes(),
+			nodeLayer.GetNumClosedNodes(),
+			nodeLayer.GetRootMask(),
+			layerHash
+		);
+
+		if (nodeLayer.GetNodelayer() != 11)
+			continue;
+
+		constexpr std::array<unsigned int, 5> debugNodeIDs = {7353u, 4975u, 6747u, 6750u, 6754u};
+		for (const unsigned int nodeID: debugNodeIDs) {
+			if (nodeID >= static_cast<unsigned int>(nodeLayer.GetMaxNodesAlloced()))
+				continue;
+
+			const INode* node = nodeLayer.GetPoolNode(nodeID);
+			uint32_t neighbourHash = 0x918743afu;
+			for (const INode::NeighbourPoints& neighbour: node->GetNeighbours()) {
+				neighbourHash = ReplayCheckpointPathHashUInt(neighbourHash, static_cast<uint32_t>(neighbour.nodeId));
+				neighbourHash = spring::LiteHash(&neighbour.netpoints[0].x, sizeof(neighbour.netpoints[0].x), neighbourHash);
+				neighbourHash = spring::LiteHash(&neighbour.netpoints[0].y, sizeof(neighbour.netpoints[0].y), neighbourHash);
+			}
+
+			LOG("[ReplayCheckpoint][qtpfs-node] %s frame=%d type=%d node=%u raw=%u number=%08x leaf=%u exit=%u bounds=<%d,%d,%d,%d> cost=%.8g child=%u neighbours=%u neighbourHash=%08x",
+				label,
+				gs->frameNum,
+				nodeLayer.GetNodelayer(),
+				nodeID,
+				node->GetRawIndex(),
+				node->GetNodeNumber(),
+				node->IsLeaf() ? 1u : 0u,
+				node->IsExitOnly() ? 1u : 0u,
+				node->xmin(),
+				node->zmin(),
+				node->xmax(),
+				node->zmax(),
+				node->GetMoveCost(),
+				node->GetChildBaseIndex(),
+				static_cast<unsigned int>(node->GetNeighbours().size()),
+				neighbourHash
+			);
+		}
+	}
+
+	const bool logPathDetails =
+		std::strcmp(label, "simframe-begin") == 0 ||
+		std::strcmp(label, "after-gameframe") == 0 ||
+		std::strcmp(label, "after-unit-update") == 0 ||
+		std::strcmp(label, "after-path-update") == 0 ||
+		std::strcmp(label, "after-post-load") == 0;
+
+	if (!logPathDetails)
+		return;
+
+	registry.each([&](auto entity) {
+		if (GetPath(entity) != nullptr)
+			return;
+		if (registry.any_of<PathSearch, UnsyncedPathSearch, ExternallyManagedPathSearch>(entity))
+			return;
+
+		LOG("[ReplayCheckpoint][qtpfs-entity] %s frame=%d entity=%u system=%u searchMode=%u delayedDelete=%u dirty=%u temp=%u update=%u requeue=%u searchRef=%u process=%u sharedChain=%u partialChain=%u",
+			label,
+			gs->frameNum,
+			static_cast<unsigned int>(entt::to_integral(entity)),
+			entity == systemEntity ? 1u : 0u,
+			registry.any_of<SearchModeIPath>(entity) ? 1u : 0u,
+			registry.any_of<PathDelayedDelete>(entity) ? 1u : 0u,
+			registry.any_of<PathIsDirty>(entity) ? 1u : 0u,
+			registry.any_of<PathIsTemp>(entity) ? 1u : 0u,
+			registry.any_of<PathIsToBeUpdated>(entity) ? 1u : 0u,
+			registry.any_of<PathRequeueSearch>(entity) ? 1u : 0u,
+			registry.any_of<PathSearchRef>(entity) ? 1u : 0u,
+			registry.any_of<ProcessPath>(entity) ? 1u : 0u,
+			registry.any_of<SharedPathChain>(entity) ? 1u : 0u,
+			registry.any_of<PartialSharedPathChain>(entity) ? 1u : 0u
+		);
+	});
+
+	auto pathView = registry.view<IPath>();
+	for (auto entity: pathView) {
+		const IPath& path = pathView.get<IPath>(entity);
+		const CSolidObject* owner = path.GetOwner();
+		const float3 sourcePoint = (path.NumPoints() > 0) ? path.GetSourcePoint() : ZeroVector;
+		const float3 targetPoint = (path.NumPoints() > 0) ? path.GetTargetPoint() : ZeroVector;
+		const uint32_t pathSearchHash = ReplayCheckpointPathHashPathHash(0u, path.GetHash());
+		const uint32_t virtualSearchHash = ReplayCheckpointPathHashPathHash(0u, path.GetVirtualHash());
+		const uint32_t nodeCount = path.NumNodes();
+		const SharedPathChain* sharedChain = registry.try_get<SharedPathChain>(entity);
+		const PartialSharedPathChain* partialChain = registry.try_get<PartialSharedPathChain>(entity);
+		const auto sharedIt = sharedPaths.find(path.GetHash());
+		const auto partialIt = partialSharedPaths.find(path.GetVirtualHash());
+		const uint32_t sharedPrev = sharedChain != nullptr ? static_cast<uint32_t>(entt::to_integral(sharedChain->prev)) : 0u;
+		const uint32_t sharedNext = sharedChain != nullptr ? static_cast<uint32_t>(entt::to_integral(sharedChain->next)) : 0u;
+		const uint32_t partialPrev = partialChain != nullptr ? static_cast<uint32_t>(entt::to_integral(partialChain->prev)) : 0u;
+		const uint32_t partialNext = partialChain != nullptr ? static_cast<uint32_t>(entt::to_integral(partialChain->next)) : 0u;
+		const uint32_t sharedHead = (sharedIt != sharedPaths.end() && sharedIt->second == entity) ? 1u : 0u;
+		const uint32_t partialHead = (partialIt != partialSharedPaths.end() && partialIt->second == entity) ? 1u : 0u;
+
+		LOG("[ReplayCheckpoint][qtpfs-path] %s frame=%d entity=%u id=%u owner=%d type=%d points=%u nodes=%u next=%u repath=%u updates=%u firstClean=%u hash=%08x virtual=%08x pointHash=%08x synced=%u full=%u partial=%u raw=%u dirty=%u temp=%u update=%u requeue=%u searchRef=%u searchMode=%u delayedDelete=%u sharedChain=%u sharedHead=%u sharedPrev=%u sharedNext=%u partialChain=%u partialHead=%u partialPrev=%u partialNext=%u source=<%.8g,%.8g,%.8g> target=<%.8g,%.8g,%.8g> goal=<%.8g,%.8g,%.8g> bboxMin=<%.8g,%.8g,%.8g> bboxMax=<%.8g,%.8g,%.8g>",
+			label,
+			gs->frameNum,
+			static_cast<unsigned int>(entt::to_integral(entity)),
+			path.GetID(),
+			owner != nullptr ? owner->id : -1,
+			path.GetPathType(),
+			path.NumPoints(),
+			nodeCount,
+			path.GetNextPointIndex(),
+			path.GetRepathTriggerIndex(),
+			path.GetNumPathUpdates(),
+			path.GetFirstNodeIdOfCleanPath(),
+			pathSearchHash,
+			virtualSearchHash,
+			path.CalculateHash(),
+			path.IsSynced() ? 1u : 0u,
+			path.IsFullPath() ? 1u : 0u,
+			path.IsPartialPath() ? 1u : 0u,
+			path.IsRawPath() ? 1u : 0u,
+			registry.any_of<PathIsDirty>(entity) ? 1u : 0u,
+			registry.any_of<PathIsTemp>(entity) ? 1u : 0u,
+			registry.any_of<PathIsToBeUpdated>(entity) ? 1u : 0u,
+			registry.any_of<PathRequeueSearch>(entity) ? 1u : 0u,
+			registry.any_of<PathSearchRef>(entity) ? 1u : 0u,
+			registry.any_of<SearchModeIPath>(entity) ? 1u : 0u,
+			registry.any_of<PathDelayedDelete>(entity) ? 1u : 0u,
+			registry.any_of<SharedPathChain>(entity) ? 1u : 0u,
+			sharedHead,
+			sharedPrev,
+			sharedNext,
+			registry.any_of<PartialSharedPathChain>(entity) ? 1u : 0u,
+			partialHead,
+			partialPrev,
+			partialNext,
+			sourcePoint.x, sourcePoint.y, sourcePoint.z,
+			targetPoint.x, targetPoint.y, targetPoint.z,
+			path.GetGoalPosition().x, path.GetGoalPosition().y, path.GetGoalPosition().z,
+			path.GetBoundingBoxMins().x, path.GetBoundingBoxMins().y, path.GetBoundingBoxMins().z,
+			path.GetBoundingBoxMaxs().x, path.GetBoundingBoxMaxs().y, path.GetBoundingBoxMaxs().z
+		);
+	}
 }
 
 std::int64_t QTPFS::PathManager::Finalize() {
@@ -635,14 +1788,15 @@ std::uint64_t QTPFS::PathManager::GetMemFootPrint() const {
 
 
 
-void QTPFS::PathManager::InitNodeLayersThreaded(const SRectangle& rect) {
+void QTPFS::PathManager::InitNodeLayersThreaded(const SRectangle& rect, bool reportLoadScreen) {
 	RECOIL_DETAILED_TRACY_ZONE;
 	streflop::streflop_init<streflop::Simple>();
 
 	char loadMsg[512] = {'\0'};
 	const char* fmtString = "[PathManager::%s] using %u threads for %u node-layers";
 	snprintf(loadMsg, sizeof(loadMsg), fmtString, __func__, ThreadPool::GetNumThreads(), nodeLayers.size());
-	pmLoadScreen.AddMessage(loadMsg);
+	if (reportLoadScreen)
+		pmLoadScreen.AddMessage(loadMsg);
 
 	// #ifndef NDEBUG
 	// const char* preFmtStr = "  initializing node-layer %u";
@@ -1083,21 +2237,29 @@ void QTPFS::PathManager::ReadyQueuedSearches() {
 	{
 		// Only synced searches get queued for batch processing.
 		auto pathView = registry.view<PathSearch>();
+		const std::vector<QTPFS::entity> pathSearchEntities =
+			CollectReplayCheckpointSortedEntities(pathView, LessReplayCheckpointPathSearchEntity);
 
-		// Go through in reverse order to minimize reshuffling EnTT will do with the grouping.
-		std::for_each(pathView.rbegin(), pathView.rend(), [this](QTPFS::entity entity){
+		for (const QTPFS::entity entity: pathSearchEntities) {
+			if (!registry.valid(entity) || !registry.all_of<PathSearch>(entity))
+				continue;
+
 			if (!registry.all_of<ProcessPath>(entity)) {
 				if (InitializeSearch(entity))
 					registry.emplace<ProcessPath>(entity);
 			}
-		});
+		}
 	}
 	{
 		auto pathView = registry.view<PathSearch>();
+		const std::vector<QTPFS::entity> pathSearchEntities =
+			CollectReplayCheckpointSortedEntities(pathView, LessReplayCheckpointPathSearchEntity);
 
-		// Any requests that cannot be processed should be removed. We can't do that with the r*
-		// iterators because that will break them.
-		std::for_each(pathView.begin(), pathView.end(), [this, &pathView](QTPFS::entity entity){
+		// Any requests that cannot be processed should be removed.
+		for (const QTPFS::entity entity: pathSearchEntities) {
+			if (!registry.valid(entity) || !registry.all_of<PathSearch>(entity))
+				continue;
+
 			if (!registry.all_of<ProcessPath>(entity)){
 				// Get the search PathSearch and then the path it is connected to a remove the search.
 				// find the path that is connected to this search
@@ -1109,19 +2271,16 @@ void QTPFS::PathManager::ReadyQueuedSearches() {
 				if (registry.valid(entity))
 					DestroyPathSearchEntity(entity);
 			}
-		});
+		}
 	}
 }
 
 // Common process path search entries during MT Sections
-void QTPFS::PathManager::ProcessPathSearch(int i, bool shouldBeRaw){
-	auto pathView = registry.group<PathSearch, ProcessPath>();
-	QTPFS::entity pathSearchEntity = pathView.begin()[i];
-
+void QTPFS::PathManager::ProcessPathSearch(QTPFS::entity pathSearchEntity, bool shouldBeRaw){
 	assert(registry.valid(pathSearchEntity));
 	assert(registry.all_of<PathSearch>(pathSearchEntity));
 
-	PathSearch* search = &pathView.get<PathSearch>(pathSearchEntity);
+	PathSearch* search = &registry.get<PathSearch>(pathSearchEntity);
 
 	if (search->rawPathCheck == shouldBeRaw) {
 		int pathType = search->GetPathType();
@@ -1134,29 +2293,33 @@ void QTPFS::PathManager::ProcessPathSearch(int i, bool shouldBeRaw){
 void QTPFS::PathManager::ExecuteQueuedSearches() {
 	ZoneScoped;
 
+	LogReplayCheckpointQueueState("execute-before-ready");
 	ReadyQueuedSearches();
+	LogReplayCheckpointQueueState("execute-after-ready");
 
 	// Only synced searches get queued for batch processing.
 	auto& comp = systemGlobals.GetSystemComponent<SyncUpdatedPathsComponent>();
 
 	{
 		auto pathSearchView = registry.group<PathSearch, ProcessPath>();
+		const std::vector<QTPFS::entity> pathSearchEntities =
+			CollectReplayCheckpointSortedEntities(pathSearchView, LessReplayCheckpointPathSearchEntity);
 		bool rawPathsProcessed = false;
 
 		// Process the path searches that have been marked as raw search. These searches are dependent on map data and as
 		// such cannot be safely processed in the background without risking desyncs.
-		for_mt(0, pathSearchView.size(), std::function<void(int)>{[this](int i){
+		for_mt(0, static_cast<int>(pathSearchEntities.size()), std::function<void(int)>{[this, &pathSearchEntities](int i){
 			SCOPED_MT_TIMER("Sim::Path::RawSearches");
-			ProcessPathSearch(i, true); // shouldBeRaw = true
+			ProcessPathSearch(pathSearchEntities[i], true); // shouldBeRaw = true
 		}});
 
 		// Clean up raw path searches and queue any new regular path searches needed, which can be processed in the
 		// background.
-		for (auto pathSearchEntity : pathSearchView) {
-			assert(registry.valid(pathSearchEntity));
-			assert(registry.all_of<PathSearch>(pathSearchEntity));
+		for (const QTPFS::entity pathSearchEntity: pathSearchEntities) {
+			if (!registry.valid(pathSearchEntity) || !registry.all_of<PathSearch>(pathSearchEntity))
+				continue;
 
-			PathSearch* search = &pathSearchView.get<PathSearch>(pathSearchEntity);
+			PathSearch* search = &registry.get<PathSearch>(pathSearchEntity);
 			if (search->rawPathCheck) {
 				FinishPathSearch(this, search);
 
@@ -1172,18 +2335,23 @@ void QTPFS::PathManager::ExecuteQueuedSearches() {
 		// additional frame delays in resolving the path requests.
 		if (rawPathsProcessed)
 			ReadyQueuedSearches();
+		LogReplayCheckpointQueueState("execute-after-raw-clean");
+		NormalizePathAllocatorFreeList();
 	}
 	{
 		// Remember: Do NOT impact this group while the background tasks are running!
 		auto pathSearchView = registry.group<PathSearch, ProcessPath>();
+		const std::vector<QTPFS::entity> pathSearchEntities =
+			CollectReplayCheckpointSortedEntities(pathSearchView, LessReplayCheckpointPathSearchEntity);
 
 		// Execute pending searches collected via RequestPath and QueueDeadPathSearches in the background. This allows
 		// other systems to run while the path searches are being processed, which can be a significant time saving if
 		// there are many path searches to process.
-		comp.backgroundTask = for_mt_background(0, pathSearchView.size(), std::function<void(int)>{[this](int i){
+		comp.backgroundTask = for_mt_background(0, static_cast<int>(pathSearchEntities.size()), std::function<void(int)>{[this, pathSearchEntities](int i){
 			SCOPED_MT_TIMER("Sim::Path::Requests");
-			ProcessPathSearch(i, false); // shouldBeRaw = false
+			ProcessPathSearch(pathSearchEntities[i], false); // shouldBeRaw = false
 		}});
+		LogReplayCheckpointQueueState("execute-before-background");
 	}
 }
 
@@ -1238,6 +2406,8 @@ bool QTPFS::PathManager::ExecuteSearch(
 	bool forceFullPath = false;
 	QTPFS::entity chainHeadEntity = entt::null;
 	QTPFS::entity partialChainHeadEntity = entt::null;
+	bool sharedPathIsCopyable = false;
+	bool partialPathIsCopyable = false;
 
 	// TODO: make a function?
 	if (path->GetOwner() != nullptr)
@@ -1254,13 +2424,28 @@ bool QTPFS::PathManager::ExecuteSearch(
 				assert(path->GetVirtualHash() != QTPFS::BAD_HASH);
 				partialChainHeadEntity = partialSharedPathsIt->second;
 				if (partialChainHeadEntity != pathEntity) {
-					bool pathIsCopyable = !registry.all_of<PathSearchRef>(partialChainHeadEntity);
-					if (!pathIsCopyable) {
+					partialPathIsCopyable = !registry.all_of<PathSearchRef>(partialChainHeadEntity);
+					if (!partialPathIsCopyable) {
 
 						// if (search->Getowner() != nullptr && 2102 == search->Getowner()->id)
 						// 	LOG("%s: partial-share search waiting (%d)", __func__, search->GetID());
 
 						search->pathRequestWaiting = true;
+						if (ReplayCheckpointDebugQTPFSFrame()) {
+							LOG("[ReplayCheckpoint][qtpfs-search] manager-wait-partial frame=%d path=%u search=%u thread=%d owner=%d raw=%u allowPartial=%u partialHead=%u partialCopyable=%u hash=%08x virtual=%08x",
+								gs->frameNum,
+								static_cast<unsigned int>(entt::to_integral(pathEntity)),
+								static_cast<unsigned int>(entt::to_integral(QTPFS::entity(search->GetID()))),
+								currentThread,
+								owner != nullptr ? owner->id : -1,
+								search->rawPathCheck ? 1u : 0u,
+								search->allowPartialSearch ? 1u : 0u,
+								static_cast<unsigned int>(entt::to_integral(partialChainHeadEntity)),
+								partialPathIsCopyable ? 1u : 0u,
+								ReplayCheckpointPathHashPathHash(0u, path->GetHash()),
+								ReplayCheckpointPathHashPathHash(0u, path->GetVirtualHash())
+							);
+						}
 						return false;
 					}
 
@@ -1289,13 +2474,29 @@ bool QTPFS::PathManager::ExecuteSearch(
 				// LOG("%s: chainHeadEntity %x != pathEntity %x", __func__
 				// 		, entt::to_integral(chainHeadEntity), entt::to_integral(pathEntity));
 				if (chainHeadEntity != pathEntity){
-					bool pathIsCopyable = !registry.all_of<PathSearchRef>(chainHeadEntity);
-					if (pathIsCopyable) {
+					sharedPathIsCopyable = !registry.all_of<PathSearchRef>(chainHeadEntity);
+					if (sharedPathIsCopyable) {
 						// LOG("%s: pathEntity %x pathIsCopyable = %d", __func__
 						// 		, entt::to_integral(pathEntity), int(pathIsCopyable));
 						auto& headChainPath = registry.get<IPath>(chainHeadEntity);
 						search->SharedFinalize(&headChainPath, path);
 						search->pathRequestWaiting = false;
+						if (ReplayCheckpointDebugQTPFSFrame()) {
+							LOG("[ReplayCheckpoint][qtpfs-search] manager-shared-copy frame=%d path=%u search=%u thread=%d owner=%d sharedHead=%u sharedCopyable=%u headPoints=%u headNodes=%u resultPoints=%u resultNodes=%u resultHash=%08x",
+								gs->frameNum,
+								static_cast<unsigned int>(entt::to_integral(pathEntity)),
+								static_cast<unsigned int>(entt::to_integral(QTPFS::entity(search->GetID()))),
+								currentThread,
+								owner != nullptr ? owner->id : -1,
+								static_cast<unsigned int>(entt::to_integral(chainHeadEntity)),
+								sharedPathIsCopyable ? 1u : 0u,
+								headChainPath.NumPoints(),
+								headChainPath.NumNodes(),
+								path->NumPoints(),
+								path->NumNodes(),
+								path->CalculateHash()
+							);
+						}
 
 						// if (search->Getowner() != nullptr && 2102 == search->Getowner()->id)
 						// 	LOG("%s: full shared (%d)", __func__, search->GetID());
@@ -1326,7 +2527,26 @@ bool QTPFS::PathManager::ExecuteSearch(
 						}
 					}
 					if (!forceFullPath)
+					{
+						if (ReplayCheckpointDebugQTPFSFrame()) {
+							LOG("[ReplayCheckpoint][qtpfs-search] manager-wait-shared frame=%d path=%u search=%u thread=%d owner=%d raw=%u allowPartial=%u sharedHead=%u sharedCopyable=%u partialHead=%u forceFull=%u hash=%08x virtual=%08x",
+								gs->frameNum,
+								static_cast<unsigned int>(entt::to_integral(pathEntity)),
+								static_cast<unsigned int>(entt::to_integral(QTPFS::entity(search->GetID()))),
+								currentThread,
+								owner != nullptr ? owner->id : -1,
+								search->rawPathCheck ? 1u : 0u,
+								search->allowPartialSearch ? 1u : 0u,
+								static_cast<unsigned int>(entt::to_integral(chainHeadEntity)),
+								sharedPathIsCopyable ? 1u : 0u,
+								static_cast<unsigned int>(entt::to_integral(partialChainHeadEntity)),
+								forceFullPath ? 1u : 0u,
+								ReplayCheckpointPathHashPathHash(0u, path->GetHash()),
+								ReplayCheckpointPathHashPathHash(0u, path->GetVirtualHash())
+							);
+						}
 						return false;
+					}
 				}
 			}
 		}
@@ -1337,6 +2557,32 @@ bool QTPFS::PathManager::ExecuteSearch(
 	bool isHeadOfPathSharing = !search->doPartialSearch;
 	search->tryPathRepair &= isHeadOfPathSharing;
 
+	if (ReplayCheckpointDebugQTPFSFrame()) {
+		LOG("[ReplayCheckpoint][qtpfs-search] manager-execute frame=%d path=%u search=%u thread=%d owner=%d immediate=%u raw=%u allowPartial=%u doPartial=%u doRepair=%u tryRepair=%u sharedHead=%u sharedCopyable=%u partialHead=%u partialCopyable=%u forceFull=%u hash=%08x virtual=%08x source=<%.8g,%.8g,%.8g> target=<%.8g,%.8g,%.8g> goal=<%.8g,%.8g,%.8g>",
+			gs->frameNum,
+			static_cast<unsigned int>(entt::to_integral(pathEntity)),
+			static_cast<unsigned int>(entt::to_integral(QTPFS::entity(search->GetID()))),
+			currentThread,
+			owner != nullptr ? owner->id : -1,
+			immediateSearch ? 1u : 0u,
+			search->rawPathCheck ? 1u : 0u,
+			search->allowPartialSearch ? 1u : 0u,
+			search->doPartialSearch ? 1u : 0u,
+			search->doPathRepair ? 1u : 0u,
+			search->tryPathRepair ? 1u : 0u,
+			static_cast<unsigned int>(entt::to_integral(chainHeadEntity)),
+			sharedPathIsCopyable ? 1u : 0u,
+			static_cast<unsigned int>(entt::to_integral(partialChainHeadEntity)),
+			partialPathIsCopyable ? 1u : 0u,
+			forceFullPath ? 1u : 0u,
+			ReplayCheckpointPathHashPathHash(0u, path->GetHash()),
+			ReplayCheckpointPathHashPathHash(0u, path->GetVirtualHash()),
+			path->GetSourcePoint().x, path->GetSourcePoint().y, path->GetSourcePoint().z,
+			path->GetTargetPoint().x, path->GetTargetPoint().y, path->GetTargetPoint().z,
+			path->GetGoalPosition().x, path->GetGoalPosition().y, path->GetGoalPosition().z
+		);
+	}
+
 	search->InitializeThread(&searchThreadData[currentThread]);
 
 	if (search->doPartialSearch) {
@@ -1346,7 +2592,24 @@ bool QTPFS::PathManager::ExecuteSearch(
 		search->LoadRepairPath();
 	}
 
-	if (search->Execute(searchStateOffset)) {
+	const bool executed = search->Execute(searchStateOffset);
+	if (ReplayCheckpointDebugQTPFSFrame()) {
+		LOG("[ReplayCheckpoint][qtpfs-search] manager-execute-result frame=%d path=%u search=%u thread=%d executed=%u found=%u waiting=%u rejectPartial=%u points=%u nodes=%u hash=%08x",
+			gs->frameNum,
+			static_cast<unsigned int>(entt::to_integral(pathEntity)),
+			static_cast<unsigned int>(entt::to_integral(QTPFS::entity(search->GetID()))),
+			currentThread,
+			executed ? 1u : 0u,
+			search->PathWasFound() ? 1u : 0u,
+			search->pathRequestWaiting ? 1u : 0u,
+			search->rejectPartialSearch ? 1u : 0u,
+			path->NumPoints(),
+			path->NumNodes(),
+			path->CalculateHash()
+		);
+	}
+
+	if (executed) {
 		search->Finalize(path);
 
 		#ifdef QTPFS_TRACE_PATH_SEARCHES
@@ -1372,7 +2635,13 @@ void QTPFS::PathManager::QueueDeadPathSearches() {
 		auto pathsToUpdate = dirtyView.size();
 		// LOG("%s: dirtyView=%d", __func__, (int)pathsToUpdate);
 		if (pathsToUpdate > 0) {
-			for (auto path : dirtyView) {
+			const std::vector<QTPFS::entity> dirtyPathEntities =
+				CollectReplayCheckpointSortedEntities(dirtyView, LessReplayCheckpointPathEntity);
+
+			for (const QTPFS::entity path: dirtyPathEntities) {
+				if (!registry.valid(path) || !registry.all_of<PathIsDirty>(path))
+					continue;
+
 				assert(!registry.any_of<PathIsToBeUpdated>(path));
 				registry.emplace<PathIsToBeUpdated>(path);
 			}
@@ -1388,8 +2657,14 @@ void QTPFS::PathManager::QueueDeadPathSearches() {
 	if (pathUpdatesView.size_hint() > 0) {
 		auto rate = std::min(updateDirtyPathRate + (updateDirtyPathRemainder-- > 0), (int)pathUpdatesView.size_hint());
 		updateDirtyPathRemainder += (updateDirtyPathRemainder < 0);
+		const std::vector<QTPFS::entity> pathUpdateEntities =
+			CollectReplayCheckpointSortedEntities(pathUpdatesView, LessReplayCheckpointPathEntity);
 
-		std::for_each_n(pathUpdatesView.begin(), rate, [this, &pathUpdatesView](auto entity) {
+		for (int i = 0; i < rate && i < static_cast<int>(pathUpdateEntities.size()); ++i) {
+			const QTPFS::entity entity = pathUpdateEntities[i];
+			if (!registry.valid(entity) || !registry.all_of<IPath, PathIsToBeUpdated>(entity))
+				continue;
+
 			assert(registry.valid(entity));
 			IPath* path = &pathUpdatesView.get<IPath>(entity);
 
@@ -1401,7 +2676,7 @@ void QTPFS::PathManager::QueueDeadPathSearches() {
 			registry.emplace_or_replace<PathUpdatedCounterIncrease>(entity);
 
 			RequeueSearch(path, true, false, true);
-		});
+		}
 	}
 }
 
@@ -1530,6 +2805,8 @@ unsigned int QTPFS::PathManager::QueueSearch(
 	// 			, sourcePoint.x, sourcePoint.z, targetPoint.x, targetPoint.z);
 	// }
 
+	LogReplayCheckpointQueueSearch("queue-search", pathEntity, searchEntity);
+
 	return (newPath->GetID());
 }
 
@@ -1617,6 +2894,8 @@ unsigned int QTPFS::PathManager::RequeueSearch(
 	// 			, pos.x, pos.z);
 	// }
 
+	LogReplayCheckpointQueueSearch("requeue-search", pathEntity, searchEntity);
+
 	return (oldPath->GetID());
 }
 
@@ -1635,19 +2914,65 @@ void QTPFS::PathManager::DeletePath(unsigned int pathID, bool force) {
 
 	bool pathMarkedForSharing = registry.all_of<SharedPathChain>(pathEntity);
 	bool pathIsBeingProcessed = registry.any_of<PathIsDirty, PathSearchRef>(pathEntity);
+	IPath* path = GetPath(pathEntity);
+	const bool alreadyDelayed = registry.all_of<PathDelayedDelete>(pathEntity);
 
-	if (!registry.all_of<PathDelayedDelete>(pathEntity)) {
+	if (ReplayCheckpointDebugQTPFSLifecycleFrame()) {
+		LOG("[ReplayCheckpoint][qtpfs-delete] request frame=%d path=%u force=%u alreadyDelayed=%u shared=%u processing=%u owner=%d type=%d hash=%08x virtual=%08x points=%u",
+			gs->frameNum,
+			static_cast<unsigned int>(entt::to_integral(pathEntity)),
+			force ? 1u : 0u,
+			alreadyDelayed ? 1u : 0u,
+			pathMarkedForSharing ? 1u : 0u,
+			pathIsBeingProcessed ? 1u : 0u,
+			(path != nullptr && path->GetOwner() != nullptr) ? path->GetOwner()->id : -1,
+			(path != nullptr) ? path->GetPathType() : -1,
+			(path != nullptr) ? ReplayCheckpointPathHashPathHash(0u, path->GetHash()) : 0u,
+			(path != nullptr) ? ReplayCheckpointPathHashPathHash(0u, path->GetVirtualHash()) : 0u,
+			(path != nullptr) ? path->NumPoints() : 0u
+		);
+	}
+
+	if (!alreadyDelayed) {
 		// We either hold a potentially useful valid path for a short while so that it can be shared with other path
 		// requests, or it is a path we can throw away at the first safe opportunity: this function could be called
 		// while background path requests are underway, which could run the risk of a desync.
 		int delayFrames = (pathMarkedForSharing && !pathIsBeingProcessed && !force) ? GAME_SPEED : 0;
+		if (delayFrames > 0) {
+			if (path != nullptr)
+				path->SetOwner(nullptr);
+		}
 		registry.emplace<PathDelayedDelete>(pathEntity, gs->frameNum + delayFrames);
+
+		if (ReplayCheckpointDebugQTPFSLifecycleFrame()) {
+			LOG("[ReplayCheckpoint][qtpfs-delete] delayed frame=%d path=%u until=%d delay=%d owner=%d",
+				gs->frameNum,
+				static_cast<unsigned int>(entt::to_integral(pathEntity)),
+				gs->frameNum + delayFrames,
+				delayFrames,
+				(path != nullptr && path->GetOwner() != nullptr) ? path->GetOwner()->id : -1
+			);
+		}
 	}
 }
 
 void QTPFS::PathManager::DeletePathEntity(QTPFS::entity pathEntity) {
 	RECOIL_DETAILED_TRACY_ZONE;
 	const PathTraceMapIt pathTraceIt = pathTraces.find(entt::to_integral(pathEntity));
+
+	if (ReplayCheckpointDebugQTPFSLifecycleFrame()) {
+		const IPath* path = GetPath(pathEntity);
+		LOG("[ReplayCheckpoint][qtpfs-delete] destroy frame=%d path=%u delayed=%u owner=%d type=%d hash=%08x virtual=%08x points=%u",
+			gs->frameNum,
+			static_cast<unsigned int>(entt::to_integral(pathEntity)),
+			registry.any_of<PathDelayedDelete>(pathEntity) ? 1u : 0u,
+			(path != nullptr && path->GetOwner() != nullptr) ? path->GetOwner()->id : -1,
+			(path != nullptr) ? path->GetPathType() : -1,
+			(path != nullptr) ? ReplayCheckpointPathHashPathHash(0u, path->GetHash()) : 0u,
+			(path != nullptr) ? ReplayCheckpointPathHashPathHash(0u, path->GetVirtualHash()) : 0u,
+			(path != nullptr) ? path->NumPoints() : 0u
+		);
+	}
 
 	RemovePathFromShared(pathEntity);
 	RemovePathFromPartialShared(pathEntity);

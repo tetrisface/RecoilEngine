@@ -38,6 +38,7 @@
 #include "Sim/Misc/CollisionVolume.h"
 #include "Sim/Misc/DamageArray.h"
 #include "Sim/Misc/DamageArrayHandler.h"
+#include "Sim/Misc/GlobalSynced.h"
 #include "Sim/Misc/LosHandler.h"
 #include "Sim/Misc/ModInfo.h"
 #include "Sim/Misc/SmoothHeightMesh.h"
@@ -76,6 +77,7 @@
 #include "Sim/Weapons/WeaponTarget.h"
 #include "System/EventHandler.h"
 #include "System/ObjectDependenceTypes.h"
+#include "System/Config/ConfigHandler.h"
 #include "System/Log/ILog.h"
 
 using std::max;
@@ -650,6 +652,68 @@ static int SetSolidObjectBlocking(lua_State* L, CSolidObject* o)
 }
 
 template<typename T>
+static const char* ReplayCheckpointLuaObjectKind()
+{
+	if constexpr (std::is_same_v<T, CUnit>)
+		return "unit";
+	else if constexpr (std::is_same_v<T, CFeature>)
+		return "feature";
+	else
+		return "solid";
+}
+
+static bool ReplayCheckpointDebugLuaSyncedCtrlFrame()
+{
+	return (gs != nullptr && configHandler != nullptr && gs->frameNum == configHandler->GetInt("ReplayCheckpointDebugSignatureFrame"));
+}
+
+template<typename T>
+static void LogReplayCheckpointLuaSolidObjectRotation(const char* op, const T* o, const float3& value)
+{
+	if (!ReplayCheckpointDebugLuaSyncedCtrlFrame())
+		return;
+
+	LOG("[ReplayCheckpoint][lua-synced-ctrl] op=%s frame=%d kind=%s id=%d team=%d value=<%.8g,%.8g,%.8g>",
+		op,
+		gs->frameNum,
+		ReplayCheckpointLuaObjectKind<T>(),
+		(o != nullptr) ? o->id : -1,
+		(o != nullptr) ? o->team : -1,
+		value.x, value.y, value.z
+	);
+}
+
+template<typename T>
+static void LogReplayCheckpointLuaSolidObjectHeadingAndUpDir(const T* o, short heading, const float3& upDir)
+{
+	if (!ReplayCheckpointDebugLuaSyncedCtrlFrame())
+		return;
+
+	LOG("[ReplayCheckpoint][lua-synced-ctrl] op=SetHeadingAndUpDir frame=%d kind=%s id=%d team=%d heading=%d up=<%.8g,%.8g,%.8g>",
+		gs->frameNum,
+		ReplayCheckpointLuaObjectKind<T>(),
+		(o != nullptr) ? o->id : -1,
+		(o != nullptr) ? o->team : -1,
+		static_cast<int>(heading),
+		upDir.x, upDir.y, upDir.z
+	);
+}
+
+static void LogReplayCheckpointLuaWorldObjectVelocity(const CWorldObject* o, const float3& value)
+{
+	if (!ReplayCheckpointDebugLuaSyncedCtrlFrame())
+		return;
+
+	const CSolidObject* so = dynamic_cast<const CSolidObject*>(o);
+	LOG("[ReplayCheckpoint][lua-synced-ctrl] op=SetVelocity frame=%d id=%d team=%d value=<%.8g,%.8g,%.8g>",
+		gs->frameNum,
+		(so != nullptr) ? so->id : -1,
+		(so != nullptr) ? so->team : -1,
+		value.x, value.y, value.z
+	);
+}
+
+template<typename T>
 static int SetSolidObjectRotation(lua_State* L, T* o)
 {
 	if (o == nullptr)
@@ -660,6 +724,7 @@ static int SetSolidObjectRotation(lua_State* L, T* o)
 	angles[CMatrix44f::ANGLE_Y] = luaL_checkfloat(L, 3);
 	angles[CMatrix44f::ANGLE_R] = luaL_checkfloat(L, 4);
 
+	LogReplayCheckpointLuaSolidObjectRotation("SetRotation", o, angles);
 	o->SetDirVectorsEuler(angles);
 
 	if constexpr(std::is_same_v<T, CFeature>)
@@ -679,6 +744,7 @@ static int SetSolidObjectHeadingAndUpDir(lua_State* L, T* o)
 	if (math::fabsf(newUpDir.SqLength() - 1.0f) > float3::cmp_eps())
 		luaL_error(L, "[%s] Invalid upward-direction (%f, %f, %f), id = %d, model = %s, teamID = %d", __func__, newUpDir.x, newUpDir.y, newUpDir.z, o->id, o->model ? o->model->name.c_str() : "nullptr", o->team);
 
+	LogReplayCheckpointLuaSolidObjectHeadingAndUpDir(o, heading, newUpDir);
 	o->heading = heading;
 	o->UpdateDirVectors(newUpDir);
 	o->SetFacingFromHeading();
@@ -764,6 +830,7 @@ static int SetWorldObjectVelocity(lua_State* L, CWorldObject* o)
 	speed.y = std::clamp(luaL_checkfloat(L, 3), -MAX_UNIT_SPEED, MAX_UNIT_SPEED);
 	speed.z = std::clamp(luaL_checkfloat(L, 4), -MAX_UNIT_SPEED, MAX_UNIT_SPEED);
 
+	LogReplayCheckpointLuaWorldObjectVelocity(o, speed);
 	o->SetVelocityAndSpeed(speed);
 	return 0;
 }
@@ -1870,6 +1937,21 @@ int LuaSyncedCtrl::CreateUnit(lua_State* L)
 	}
 	if (!unitHandler.CanBuildUnit(unitDef, teamID))
 		return 0; // unit limit reached
+
+	if (ReplayCheckpointDebugLuaSyncedCtrlFrame()) {
+		LOG("[ReplayCheckpoint][lua-create-unit] frame=%d def=%d name=%s pos=<%.8g,%.8g,%.8g> facing=%d team=%d beingBuilt=%u flatten=%u requestedID=%d builderArg=%d",
+			gs->frameNum,
+			unitDef->id,
+			unitDef->name.c_str(),
+			pos.x, pos.y, pos.z,
+			facing,
+			teamID,
+			beingBuilt ? 1u : 0u,
+			flattenGround ? 1u : 0u,
+			luaL_optint(L, 9, -1),
+			luaL_optint(L, 10, -1)
+		);
+	}
 
 	ASSERT_SYNCED(pos);
 	ASSERT_SYNCED(facing);

@@ -235,6 +235,24 @@ static void LogReplayCheckpointUnitHandlerSignature(
 	);
 }
 
+static void LogReplayCheckpointUnitSlowUpdateBoundary(const char* phase, size_t index, const CUnit* unit)
+{
+	const int debugFrame = configHandler->GetInt("ReplayCheckpointDebugSignatureFrame");
+
+	if (debugFrame < 0 || gs == nullptr || gs->frameNum != debugFrame || unit == nullptr)
+		return;
+
+	LOG("[ReplayCheckpoint][unit-slow-boundary] phase=%s frame=%d index=%u unit=%d sync=%08x rng=%llu hash=%08x",
+		phase,
+		gs->frameNum,
+		static_cast<unsigned int>(index),
+		unit->id,
+		CSyncChecker::GetChecksum(),
+		static_cast<unsigned long long>(gsRNG.GetGenState()),
+		ReplayCheckpointUnitHandlerHashUnitMoveState(unit)
+	);
+}
+
 
 CR_BIND(CUnitHandler, )
 CR_REG_METADATA(CUnitHandler, (
@@ -529,8 +547,11 @@ void CUnitHandler::UpdateUnitMoveTypes()
 	SCOPED_TIMER("Sim::Unit::MoveType");
 
 	GroundMoveSystem::Update();
+	LogReplayCheckpointUnitHandlerSignature("after-ground-move-system", activeUnits, activeSlowUpdateUnit, activeUpdateUnit);
 	GeneralMoveSystem::Update();
+	LogReplayCheckpointUnitHandlerSignature("after-general-move-system", activeUnits, activeSlowUpdateUnit, activeUpdateUnit);
 	UnitTrapCheckSystem::Update();
+	LogReplayCheckpointUnitHandlerSignature("after-trap-check-system", activeUnits, activeSlowUpdateUnit, activeUpdateUnit);
 }
 
 void CUnitHandler::UpdateUnitLosStates()
@@ -570,9 +591,12 @@ void CUnitHandler::SlowUpdateUnits()
 		for (size_t i = idxBeg; i < idxEnd; ++i) {
 			CUnit* unit = activeUnits[i];
 
+			LogReplayCheckpointUnitSlowUpdateBoundary("before", i, unit);
 			unit->SanityCheck();
 			unit->SlowUpdate();
+			LogReplayCheckpointUnitSlowUpdateBoundary("after-slow", i, unit);
 			unit->SlowUpdateWeapons();
+			LogReplayCheckpointUnitSlowUpdateBoundary("after-weapons", i, unit);
 			unit->SanityCheck();
 
 			if (!unit->isDead && unit->localModel.GetBoundariesNeedsRecalc())

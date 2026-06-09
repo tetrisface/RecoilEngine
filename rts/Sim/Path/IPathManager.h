@@ -51,8 +51,11 @@ public:
 	virtual void DeletePath(unsigned int pathID, bool force = false) {}
 
 	virtual void ResetLivePathsForLoad() {}
+	virtual void RebuildReplayCheckpointNodeLayersForLoad() {}
+	virtual bool RestoreReplayCheckpointPathsForLoad() { return false; }
 	virtual void RestoreReplayCheckpointPathAllocator() {}
 	virtual void SerializeReplayCheckpointState(creg::ISerializer* s) {}
+	virtual void LogReplayCheckpointStateSignature(const char* label) const {}
 
 	/**
 	 * Returns the next waypoint of the path.

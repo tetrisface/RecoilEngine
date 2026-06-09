@@ -15,6 +15,7 @@
 #include "Sim/Projectiles/ExplosionGenerator.h"
 #include "Sim/Projectiles/PieceProjectile.h"
 #include "Sim/Projectiles/ProjectileHandler.h"
+#include "Sim/Misc/GlobalSynced.h"
 #include "Rendering/Models/3DModel.hpp"
 #include "Rendering/Models/3DModelPiece.hpp"
 #include "Rendering/Models/LocalModelPiece.hpp"
@@ -35,6 +36,8 @@
 #include "Sim/Weapons/Weapon.h"
 #include "System/StringUtil.h"
 #include "System/SpringMath.h"
+#include "System/Config/ConfigHandler.h"
+#include "System/Log/ILog.h"
 #include "System/Sound/ISoundChannels.h"
 
 #include "System/Misc/TracyDefs.h"
@@ -60,6 +63,71 @@ inline bool CCobInstance::HasFunction(int id) const
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 	return (cobFile->scriptIndex.size() > id && cobFile->scriptIndex[id] >= 0);
+}
+
+static constexpr int REPLAY_CHECKPOINT_DEBUG_COB_INSTANCE_UNIT_ID = 15919;
+
+static bool ReplayCheckpointDebugCobInstanceFrame(const CCobInstance* cobInst)
+{
+	return (
+		gs != nullptr &&
+		configHandler != nullptr &&
+		gs->frameNum == configHandler->GetInt("ReplayCheckpointDebugSignatureFrame") &&
+		cobInst != nullptr &&
+		cobInst->GetUnit() != nullptr &&
+		cobInst->GetUnit()->id == REPLAY_CHECKPOINT_DEBUG_COB_INSTANCE_UNIT_ID
+	);
+}
+
+static const char* ReplayCheckpointCobFunctionName(const CCobFile* cobFile, int functionId)
+{
+	if (cobFile == nullptr || functionId < 0 || size_t(functionId) >= cobFile->scriptNames.size())
+		return "<invalid>";
+
+	return cobFile->scriptNames[functionId].c_str();
+}
+
+static void LogReplayCheckpointCobRealCall(
+	const char* phase,
+	const CCobInstance* cobInst,
+	const CCobThread* thread,
+	int functionId,
+	const std::array<int, 1 + MAX_COB_ARGS>& args,
+	CCobInstance::ThreadCallbackType cb,
+	int cbParam,
+	int ret
+) {
+	if (!ReplayCheckpointDebugCobInstanceFrame(cobInst))
+		return;
+
+	LOG("[ReplayCheckpoint][cob-call] %s frame=%d time=%d unit=%d function=%d name=%s cb=%d cbParam=%d args=%d|%d|%d|%d|%d ret=%d thread=%d state=%d wake=%d pc=%d wait=%d|%d sig=%d call=%u|%08x data=%u|%08x lua=%08x",
+		phase,
+		gs->frameNum,
+		(cobEngine != nullptr) ? cobEngine->GetCurrTime() : -1,
+		cobInst->GetUnit()->id,
+		functionId,
+		ReplayCheckpointCobFunctionName(cobInst->GetFile(), functionId),
+		static_cast<int>(cb),
+		cbParam,
+		args[0],
+		args[1],
+		args[2],
+		args[3],
+		args[4],
+		ret,
+		(thread != nullptr) ? thread->GetID() : -1,
+		(thread != nullptr) ? static_cast<int>(thread->GetState()) : -1,
+		(thread != nullptr) ? thread->GetWakeTime() : -1,
+		(thread != nullptr) ? thread->GetProgramCounter() : -1,
+		(thread != nullptr) ? thread->GetWaitAxis() : -1,
+		(thread != nullptr) ? thread->GetWaitPiece() : -1,
+		(thread != nullptr) ? thread->GetSignalMask() : -1,
+		(thread != nullptr) ? static_cast<unsigned int>(thread->GetCallStackSize()) : 0u,
+		(thread != nullptr) ? thread->GetCallStackChecksum() : 0u,
+		(thread != nullptr) ? static_cast<unsigned int>(thread->GetDataStackSize()) : 0u,
+		(thread != nullptr) ? thread->GetDataStackChecksum() : 0u,
+		(thread != nullptr) ? thread->GetLuaArgsChecksum() : 0u
+	);
 }
 
 
@@ -556,6 +624,8 @@ int CCobInstance::RealCall(int functionId, std::array<int, 1 + MAX_COB_ARGS>& ar
 		if (retCode != nullptr)
 			*retCode = ret;
 
+		LogReplayCheckpointCobRealCall("invalid", this, nullptr, functionId, args, cb, cbParam, ret);
+
 		// in case the function does not exist the callback should
 		// still be called; -1 is the default CobThread return code
 		if (cb != CBNone)
@@ -565,6 +635,7 @@ int CCobInstance::RealCall(int functionId, std::array<int, 1 + MAX_COB_ARGS>& ar
 	}
 
 	// LOG_L(L_DEBUG, "Calling %s:%s", cobFile->name.c_str(), cobFile->scriptNames[functionId].c_str());
+	LogReplayCheckpointCobRealCall("enter", this, nullptr, functionId, args, cb, cbParam, ret);
 
 	// tick the thread locally in case we're recursively running this function and then the threads may reallocate
 	CCobThread newThread(this);
@@ -575,8 +646,11 @@ int CCobInstance::RealCall(int functionId, std::array<int, 1 + MAX_COB_ARGS>& ar
 		newThread.SetCallback(cb, cbParam);
 
 	newThread.Start(functionId, 0, args, false);
+	LogReplayCheckpointCobRealCall("started", this, &newThread, functionId, args, cb, cbParam, ret);
 
 	if ((ret = newThread.Tick()) == 0) {
+		LogReplayCheckpointCobRealCall("dead-after-tick", this, &newThread, functionId, args, cb, cbParam, ret);
+
 		// thread died already after one tick
 		// NOTE:
 		//   ticking can trigger recursion, for example FireWeapon ->
@@ -604,11 +678,13 @@ int CCobInstance::RealCall(int functionId, std::array<int, 1 + MAX_COB_ARGS>& ar
 		if (retCode != nullptr)
 			*retCode = newThread.GetRetCode();
 	} else {
+		LogReplayCheckpointCobRealCall("live-after-tick", this, &newThread, functionId, args, cb, cbParam, ret);
 		cobEngine->AddThread(std::move(newThread));
 	}
 
 	// handle any spawned threads
 	cobEngine->ProcessQueuedThreads();
+	LogReplayCheckpointCobRealCall("exit", this, nullptr, functionId, args, cb, cbParam, ret);
 	return ret;
 }
 

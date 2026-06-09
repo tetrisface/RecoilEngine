@@ -6,15 +6,50 @@
 #include "Map/Ground.h"
 #include "Sim/Misc/CollisionVolume.h"
 #include "Sim/Misc/DamageArray.h"
+#include "Sim/Misc/GlobalSynced.h"
 #include "Sim/Misc/GroundBlockingObjectMap.h"
 #include "Sim/MoveTypes/MoveDefHandler.h"
 #include "Game/GameHelper.h"
+#include "System/Config/ConfigHandler.h"
+#include "System/Log/ILog.h"
 #include "System/SpringMath.h"
 #include "System/Quaternion.h"
 
 #include "System/Misc/TracyDefs.h"
 
 int CSolidObject::deletingRefID = -1;
+
+static bool ReplayCheckpointDebugSolidObjectFrame()
+{
+	return (gs != nullptr && configHandler != nullptr && gs->frameNum == configHandler->GetInt("ReplayCheckpointDebugSignatureFrame"));
+}
+
+static void LogReplayCheckpointDirVectors(const char* phase, const CSolidObject* object, const float3& uDir)
+{
+	if (!ReplayCheckpointDebugSolidObjectFrame())
+		return;
+
+	LOG("[ReplayCheckpoint][dir-vectors] %s frame=%d object=%d team=%d heading=%d creationFrame=%d physical=%u collidable=%u uDir=<%.8g,%.8g,%.8g> front=<%.8g,%.8g,%.8g> up=<%.8g,%.8g,%.8g> right=<%.8g,%.8g,%.8g>",
+		phase,
+		gs->frameNum,
+		(object != nullptr) ? object->id : -1,
+		(object != nullptr) ? object->team : -1,
+		(object != nullptr) ? static_cast<int>(object->heading) : 0,
+		(object != nullptr) ? object->creationFrame : -1,
+		(object != nullptr) ? static_cast<unsigned int>(object->physicalState) : 0u,
+		(object != nullptr) ? static_cast<unsigned int>(object->collidableState) : 0u,
+		uDir.x, uDir.y, uDir.z,
+		(object != nullptr) ? static_cast<float>(object->frontdir.x) : 0.0f,
+		(object != nullptr) ? static_cast<float>(object->frontdir.y) : 0.0f,
+		(object != nullptr) ? static_cast<float>(object->frontdir.z) : 0.0f,
+		(object != nullptr) ? static_cast<float>(object->updir.x) : 0.0f,
+		(object != nullptr) ? static_cast<float>(object->updir.y) : 0.0f,
+		(object != nullptr) ? static_cast<float>(object->updir.z) : 0.0f,
+		(object != nullptr) ? static_cast<float>(object->rightdir.x) : 0.0f,
+		(object != nullptr) ? static_cast<float>(object->rightdir.y) : 0.0f,
+		(object != nullptr) ? static_cast<float>(object->rightdir.z) : 0.0f
+	);
+}
 
 
 CR_BIND_DERIVED_INTERFACE(CSolidObject, CWorldObject)
@@ -435,6 +470,8 @@ void CSolidObject::UpdateDirVectors(bool useGroundNormal, bool useObjectNormal, 
 void CSolidObject::UpdateDirVectors(const float3& uDir)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
+	LogReplayCheckpointDirVectors("begin", this, uDir);
+
 	// set initial rotation of the object around updir=UpVector first
 	const float3 fDir = GetVectorFromHeading(heading);
 	const float3 rDir = float3{ -fDir.z, 0.0f, fDir.x };
@@ -448,6 +485,8 @@ void CSolidObject::UpdateDirVectors(const float3& uDir)
 	frontdir = quat * fDir;
 	rightdir = quat * rDir;
 	updir = uDir;
+
+	LogReplayCheckpointDirVectors("end", this, uDir);
 }
 
 void CSolidObject::CondUpdatePrevTransform()
@@ -536,4 +575,3 @@ float CSolidObject::CalcFootPrintAxisStretchFactor() const
 {
 	return (std::abs(xsize - zsize) * 1.0f / (xsize + zsize));
 }
-

@@ -223,6 +223,8 @@ namespace spring {
 
 		const std::vector<TVal>& GetData() const { return vault; }
 		      std::vector<TVal>& GetData()       { return vault; }
+		const std::vector<TKey>& GetFreeKeys() const { return freeKeys; }
+		const std::vector<TKey>& GetKeys() const { return pkVec; }
 	private:
 		template<typename ShuffleFunc>
 		TKey GetKey(ShuffleFunc&& shuffleFunc) {

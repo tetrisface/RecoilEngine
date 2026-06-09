@@ -226,6 +226,42 @@ static bool ReplayCheckpointDebugGroundMoveUnit(const CUnit* unit)
 	);
 }
 
+static bool ReplayCheckpointDebugGroundMoveLifecycleFrame()
+{
+	const int debugFrame = configHandler->GetInt("ReplayCheckpointDebugSignatureFrame");
+	return (debugFrame >= 0 && gs != nullptr && gs->frameNum >= (debugFrame - (GAME_SPEED * 2)) && gs->frameNum <= debugFrame);
+}
+
+static void LogReplayCheckpointGroundMoveDelete(
+	const char* source,
+	const CUnit* unit,
+	unsigned int deleteID,
+	unsigned int pathID,
+	unsigned int nextPathId,
+	unsigned int deletePathId,
+	bool atGoal,
+	bool atEndOfPath,
+	bool useRawMovement,
+	int progressState
+) {
+	if (!ReplayCheckpointDebugGroundMoveLifecycleFrame())
+		return;
+
+	LOG("[ReplayCheckpoint][GMT-delete] source=%s frame=%d unit=%d deletePath=%u pathID=%u nextPathId=%u deletePathId=%u atGoal=%u atEnd=%u raw=%u progress=%d",
+		source,
+		gs->frameNum,
+		(unit != nullptr) ? unit->id : -1,
+		deleteID,
+		pathID,
+		nextPathId,
+		deletePathId,
+		atGoal ? 1u : 0u,
+		atEndOfPath ? 1u : 0u,
+		useRawMovement ? 1u : 0u,
+		progressState
+	);
+}
+
 
 
 
@@ -553,14 +589,17 @@ CGroundMoveType::~CGroundMoveType()
 	Disconnect();
 
 	if (nextPathId != 0) {
+		LogReplayCheckpointGroundMoveDelete("dtor-next", owner, nextPathId, pathID, nextPathId, deletePathId, atGoal, atEndOfPath, useRawMovement, int(progressState));
 		pathManager->DeletePath(nextPathId, true);
 	}
 
 	if (pathID != 0) {
+		LogReplayCheckpointGroundMoveDelete("dtor-path", owner, pathID, pathID, nextPathId, deletePathId, atGoal, atEndOfPath, useRawMovement, int(progressState));
 		pathManager->DeletePath(pathID, true);
 	}
 
 	if (deletePathId != 0) {
+		LogReplayCheckpointGroundMoveDelete("dtor-deletePathId", owner, deletePathId, pathID, nextPathId, deletePathId, atGoal, atEndOfPath, useRawMovement, int(progressState));
 		pathManager->DeletePath(deletePathId);
 	}
 }
@@ -570,21 +609,26 @@ void CGroundMoveType::PostLoad()
 	RECOIL_DETAILED_TRACY_ZONE;
 	pathController = GMTDefaultPathController(owner);
 
-	// If the active moveType is not set to default ground move (i.e. is on scripted move type) then skip.
-	if ((uint8_t *)owner->moveType != owner->amtMemBuffer) {
+	const bool activeMoveType = (owner->moveType == this);
+	const bool previousMoveType = (owner->prevMoveType == this);
+
+	// Script move control keeps the default move-type in prevMoveType. Preserve its path state so
+	// DisableScriptMoveType can stop and release the path when control returns.
+	if (!activeMoveType && !previousMoveType) {
 		// Safety measure to clear the path id.
 		pathID = 0;
 		return;
 	}
 
-	Connect();
+	if (activeMoveType)
+		Connect();
 }
 
 void CGroundMoveType::RebuildPathAfterLoad()
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 
-	if ((uint8_t *)owner->moveType != owner->amtMemBuffer)
+	if (owner->moveType != this && owner->prevMoveType != this)
 		return;
 
 	const auto rebuildPath = [this](unsigned int loadedPathID) -> unsigned int {
@@ -685,6 +729,7 @@ void CGroundMoveType::UpdatePreCollisions()
 	// The mt section may have noticed the new path was ready and switched over to it. If so then
 	// delete the old path, which has to be done in an ST section.
 	if (deletePathId != 0) {
+		LogReplayCheckpointGroundMoveDelete("update-pre-deletePathId", owner, deletePathId, pathID, nextPathId, deletePathId, atGoal, atEndOfPath, useRawMovement, int(progressState));
 		pathManager->DeletePath(deletePathId);
 		deletePathId = 0;
 	}
@@ -2493,6 +2538,7 @@ void CGroundMoveType::StartEngine(bool callScript) {
 		pathID = GetNewPath();
 	else {
 		if (nextPathId != 0) {
+			LogReplayCheckpointGroundMoveDelete("start-nextPathId", owner, nextPathId, pathID, nextPathId, deletePathId, atGoal, atEndOfPath, useRawMovement, int(progressState));
 			pathManager->DeletePath(nextPathId);
 		}
 		nextPathId = GetNewPath();
@@ -2519,10 +2565,12 @@ void CGroundMoveType::StopEngine(bool callScript, bool hardStop) {
 	assert(!ThreadPool::IsInMultiThreadedSection());
 	if (pathID != 0 || nextPathId != 0) {
 		if (pathID != 0) {
+			LogReplayCheckpointGroundMoveDelete("stop-pathID", owner, pathID, pathID, nextPathId, deletePathId, atGoal, atEndOfPath, useRawMovement, int(progressState));
 			pathManager->DeletePath(pathID);
 			pathID = 0;
 		}
 		if (nextPathId != 0) {
+			LogReplayCheckpointGroundMoveDelete("stop-nextPathId", owner, nextPathId, pathID, nextPathId, deletePathId, atGoal, atEndOfPath, useRawMovement, int(progressState));
 			pathManager->DeletePath(nextPathId);
 			nextPathId = 0;
 		}

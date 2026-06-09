@@ -38,6 +38,8 @@ class CSyncChecker {
 		static void debugSyncCheckThreading();
 		static void Sync(uint32_t val);
 		static void Sync(const void* p, unsigned size);
+		static void SyncTagged(uint32_t val, const char* msg);
+		static void SyncTagged(const void* p, unsigned size, const char* msg);
 		#ifdef SYNC_HISTORY
 		static std::tuple<unsigned, unsigned, unsigned*> GetFrameHistory(unsigned rewindFrames);
 		static std::pair<unsigned, unsigned*> GetHistory() { return std::make_pair(nextHistoryIndex, logs.data()); };

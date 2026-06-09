@@ -161,6 +161,7 @@ public:
 	void MovedRepulser(CPlasmaRepulser* repulser);
 	void RemoveRepulser(CPlasmaRepulser* repulser);
 
+	void RestoreSerializedStateForLoad();
 	void RebuildForLoad();
 
 	// Note: ensure ReleaseVector is called in the same thread as original quad field query generated.

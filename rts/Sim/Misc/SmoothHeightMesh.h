@@ -3,6 +3,7 @@
 #ifndef SMOOTH_HEIGHT_MESH_H
 #define SMOOTH_HEIGHT_MESH_H
 
+#include <cstdint>
 #include <memory_resource>
 #include <queue>
 #include <vector>
@@ -62,6 +63,9 @@ public:
 
 	void MakeSmoothMesh();
 	void SerializeReplayCheckpoint(creg::ISerializer* s);
+	void SetReplayCheckpointMapChangedSuppressedForLoad(bool suppressed);
+	uint32_t GetReplayCheckpointStateHash() const;
+	void LogReplayCheckpointStateSignature(const char* label) const;
 
 private:
 	void InitMapChangeTracking();
@@ -87,6 +91,8 @@ private:
 	std::vector<int> maximaRows;
 
 	MapChangeTrack mapChangeTrack;
+	bool replayCheckpointMapChangedSuppressedForLoad = false;
+	unsigned int replayCheckpointSuppressedMapChangeCount = 0;
 };
 
 extern SmoothHeightMesh smoothGround;

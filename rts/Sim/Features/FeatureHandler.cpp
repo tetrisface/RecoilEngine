@@ -186,6 +186,108 @@ CFeature* CFeatureHandler::CreateWreckage(const FeatureLoadParams& cparams)
 	return (LoadFeature(params));
 }
 
+static bool FeatureNeedsUpdateAfterLoad(const CFeature* feature)
+{
+	if (feature == nullptr)
+		return false;
+
+	if (feature->deleteMe)
+		return true;
+
+	if (feature->moveCtrl.enabled)
+		return true;
+
+	if (feature->speed.w != 0.0f)
+		return true;
+
+	if (feature->smokeTime != 0 || feature->fireTime != 0)
+		return true;
+
+	if (feature->def != nullptr && feature->def->geoThermal)
+		return true;
+
+	if (gs != nullptr && feature->creationFrame == gs->frameNum)
+		return true;
+
+	return !feature->IsOnGround();
+}
+
+void CFeatureHandler::RestoreUpdateQueueForLoad()
+{
+	RECOIL_DETAILED_TRACY_ZONE;
+
+	std::vector<CFeature*> restoredUpdateFeatures;
+	restoredUpdateFeatures.reserve(updateFeatures.size());
+
+	unsigned int removedStaleFeatures = 0;
+	unsigned int removedInvalidFeatures = 0;
+	unsigned int removedDuplicateFeatures = 0;
+	unsigned int repairedFlags = 0;
+	unsigned int addedMissingFeatures = 0;
+
+	const auto isQueued = [&restoredUpdateFeatures](const CFeature* feature) {
+		return (std::find(restoredUpdateFeatures.begin(), restoredUpdateFeatures.end(), feature) != restoredUpdateFeatures.end());
+	};
+
+	for (CFeature* feature: updateFeatures) {
+		if (feature == nullptr || feature->id < 0 || static_cast<size_t>(feature->id) >= features.size() || features[feature->id] != feature) {
+			removedInvalidFeatures++;
+			continue;
+		}
+
+		if (!FeatureNeedsUpdateAfterLoad(feature)) {
+			feature->inUpdateQue = false;
+			removedStaleFeatures++;
+			continue;
+		}
+
+		if (isQueued(feature)) {
+			removedDuplicateFeatures++;
+			continue;
+		}
+
+		if (!feature->inUpdateQue) {
+			feature->inUpdateQue = true;
+			repairedFlags++;
+		}
+
+		restoredUpdateFeatures.push_back(feature);
+	}
+
+	for (CFeature* feature: features) {
+		if (feature == nullptr)
+			continue;
+
+		const bool needsUpdate = FeatureNeedsUpdateAfterLoad(feature);
+		const bool queued = isQueued(feature);
+
+		if (needsUpdate && !queued) {
+			feature->inUpdateQue = true;
+			restoredUpdateFeatures.push_back(feature);
+			addedMissingFeatures++;
+			continue;
+		}
+
+		if (!needsUpdate && feature->inUpdateQue) {
+			feature->inUpdateQue = false;
+			repairedFlags++;
+		}
+	}
+
+	updateFeatures.swap(restoredUpdateFeatures);
+
+	if (removedStaleFeatures != 0 || removedInvalidFeatures != 0 || removedDuplicateFeatures != 0 || repairedFlags != 0 || addedMissingFeatures != 0) {
+		LOG("[ReplayCheckpoint] restored feature update queue after load: size=%u stale=%u invalid=%u duplicate=%u repairedFlags=%u added=%u",
+			static_cast<unsigned int>(updateFeatures.size()),
+			removedStaleFeatures,
+			removedInvalidFeatures,
+			removedDuplicateFeatures,
+			repairedFlags,
+			addedMissingFeatures
+		);
+	}
+}
+
 void CFeatureHandler::UpdatePreFrame()
 {
 	SCOPED_TIMER("Sim::Features::UpdatePreFrame");
@@ -294,4 +396,3 @@ void CFeatureHandler::TerrainChanged(int x1, int y1, int x2, int y2)
 		}
 	}
 }
-

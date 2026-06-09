@@ -42,7 +42,7 @@ CR_REG_METADATA(CQuadField, (
 CR_BIND(CQuadField::Quad, )
 CR_REG_METADATA_SUB(CQuadField, Quad, (
 	CR_MEMBER(units),
-	CR_IGNORED(teamUnits),
+	CR_MEMBER(teamUnits),
 	CR_MEMBER(features),
 	CR_MEMBER(projectiles),
 	CR_MEMBER(repulsers),
@@ -60,6 +60,17 @@ void CQuadField::Quad::PostLoad()
 #ifndef UNIT_TEST
 	Resize(teamHandler.ActiveAllyTeams());
 
+	size_t teamUnitCount = 0;
+	for (const auto& allyTeamUnits: teamUnits) {
+		teamUnitCount += allyTeamUnits.size();
+	}
+
+	if (teamUnitCount == units.size())
+		return;
+
+	for (auto& allyTeamUnits: teamUnits) {
+		allyTeamUnits.clear();
+	}
 	for (CUnit* unit: units) {
 		spring::VectorInsertUnique(teamUnits[unit->allyteam], unit, false);
 	}
@@ -160,6 +171,16 @@ void CQuadField::RebuildForLoad()
 
 		projectile->quads.clear();
 		AddProjectile(projectile);
+	}
+#endif
+}
+
+void CQuadField::RestoreSerializedStateForLoad()
+{
+	RECOIL_DETAILED_TRACY_ZONE;
+#ifndef UNIT_TEST
+	for (Quad& quad: baseQuads) {
+		quad.PostLoad();
 	}
 #endif
 }

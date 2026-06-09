@@ -41,6 +41,7 @@
 #include "Sim/Features/FeatureDefHandler.h"
 #include "Sim/Features/FeatureHandler.h"
 #include "Sim/Misc/GlobalConstants.h"
+#include "Sim/Misc/GlobalSynced.h"
 #include "Sim/Misc/CollisionVolume.h"
 #include "Sim/Misc/LosHandler.h"
 #include "Sim/Misc/QuadField.h"
@@ -60,6 +61,7 @@
 #include "Sim/Weapons/WeaponDefHandler.h"
 #include "Sim/Weapons/WeaponLoader.h"
 #include "System/EventHandler.h"
+#include "System/Config/ConfigHandler.h"
 #include "System/Log/ILog.h"
 #include "System/Matrix44f.h"
 #include "System/SpringMath.h"
@@ -73,6 +75,69 @@
 #include "System/Misc/TracyDefs.h"
 
 GlobalUnitParams globalUnitParams;
+
+static constexpr int REPLAY_CHECKPOINT_DEBUG_DAMAGE_UNIT_ID = 15919;
+static constexpr int REPLAY_CHECKPOINT_DEBUG_DAMAGE_PROJECTILE_ID = 13147;
+
+static bool ReplayCheckpointDebugDamageFrame()
+{
+	return (gs != nullptr && configHandler != nullptr && gs->frameNum == configHandler->GetInt("ReplayCheckpointDebugSignatureFrame"));
+}
+
+static bool ReplayCheckpointShouldLogDamage(const CUnit* unit, int projectileID)
+{
+	return (
+		ReplayCheckpointDebugDamageFrame() &&
+		unit != nullptr &&
+		(unit->id == REPLAY_CHECKPOINT_DEBUG_DAMAGE_UNIT_ID || projectileID == REPLAY_CHECKPOINT_DEBUG_DAMAGE_PROJECTILE_ID)
+	);
+}
+
+static bool ReplayCheckpointDebugUnitPreInitFrame()
+{
+	return (gs != nullptr && configHandler != nullptr && gs->frameNum == configHandler->GetInt("ReplayCheckpointDebugSignatureFrame"));
+}
+
+static void LogReplayCheckpointUnitPreInit(
+	const char* phase,
+	const CUnit* unit,
+	const UnitLoadParams& params,
+	int buildFacing,
+	short initialHeading
+) {
+	if (!ReplayCheckpointDebugUnitPreInitFrame())
+		return;
+
+	const UnitDef* unitDef = params.unitDef;
+	const float frontX = (unit != nullptr) ? static_cast<float>(unit->frontdir.x) : 0.0f;
+	const float frontY = (unit != nullptr) ? static_cast<float>(unit->frontdir.y) : 0.0f;
+	const float frontZ = (unit != nullptr) ? static_cast<float>(unit->frontdir.z) : 0.0f;
+	const float upX = (unit != nullptr) ? static_cast<float>(unit->updir.x) : 0.0f;
+	const float upY = (unit != nullptr) ? static_cast<float>(unit->updir.y) : 0.0f;
+	const float upZ = (unit != nullptr) ? static_cast<float>(unit->updir.z) : 0.0f;
+	const float rightX = (unit != nullptr) ? static_cast<float>(unit->rightdir.x) : 0.0f;
+	const float rightY = (unit != nullptr) ? static_cast<float>(unit->rightdir.y) : 0.0f;
+	const float rightZ = (unit != nullptr) ? static_cast<float>(unit->rightdir.z) : 0.0f;
+
+	LOG("[ReplayCheckpoint][unit-preinit] %s frame=%d unit=%d requestedID=%d def=%d name=%s team=%d pos=<%.8g,%.8g,%.8g> speed=<%.8g,%.8g,%.8g> facing=%d buildFacing=%d heading=%d upright=%u front=<%.8g,%.8g,%.8g> up=<%.8g,%.8g,%.8g> right=<%.8g,%.8g,%.8g>",
+		phase,
+		gs->frameNum,
+		(unit != nullptr) ? unit->id : -1,
+		params.unitID,
+		(unitDef != nullptr) ? unitDef->id : -1,
+		(unitDef != nullptr) ? unitDef->name.c_str() : "<null>",
+		params.teamID,
+		params.pos.x, params.pos.y, params.pos.z,
+		params.speed.x, params.speed.y, params.speed.z,
+		params.facing,
+		buildFacing,
+		static_cast<int>(initialHeading),
+		(unit != nullptr && unit->upright) ? 1u : 0u,
+		frontX, frontY, frontZ,
+		upX, upY, upZ,
+		rightX, rightY, rightZ
+	);
+}
 
 // See end of source for member bindings
 //////////////////////////////////////////////////////////////////////
@@ -241,7 +306,9 @@ void CUnit::PreInit(const UnitLoadParams& params)
 
 	mapSquare = CGround::GetSquare((params.pos).cClampInMap());
 
-	heading  = GetHeadingFromFacing(buildFacing);
+	const short initialHeading = GetHeadingFromFacing(buildFacing);
+	LogReplayCheckpointUnitPreInit("before-heading", this, params, buildFacing, initialHeading);
+	heading  = initialHeading;
 	upright  = unitDef->upright;
 
 	SetVelocity(params.speed);
@@ -256,6 +323,7 @@ void CUnit::PreInit(const UnitLoadParams& params)
 
 	unitHandler.AddUnit(this);
 	quadField.MovedUnit(this);
+	LogReplayCheckpointUnitPreInit("after-add", this, params, buildFacing, initialHeading);
 
 	losStatus[allyteam] = LOS_ALL_MASK_BITS | LOS_INLOS | LOS_INRADAR | LOS_PREVLOS | LOS_CONTRADAR;
 
@@ -1321,6 +1389,20 @@ void CUnit::DoDamage(
 	float baseDamage = damages.Get(armorType);
 	float experienceMod = globalUnitParams.expMultiplier;
 	float impulseMult = 1.0f;
+	const bool replayCheckpointDebugDamage = ReplayCheckpointShouldLogDamage(this, projectileID);
+
+	if (replayCheckpointDebugDamage) {
+		LOG("[ReplayCheckpoint][unit-damage] enter frame=%d unit=%d projectile=%d weaponDef=%d attacker=%d health=%f base=%f impulse=<%f,%f,%f>",
+			gs->frameNum,
+			id,
+			projectileID,
+			weaponDefID,
+			(attacker != nullptr) ? attacker->id : -1,
+			health,
+			baseDamage,
+			impulse.x, impulse.y, impulse.z
+		);
+	}
 
 	const bool isCollision = (weaponDefID == -CSolidObject::DAMAGE_COLLISION_OBJECT || weaponDefID == -CSolidObject::DAMAGE_COLLISION_GROUND);
 	const bool isParalyzer = (damages.paralyzeDamageTime != 0);
@@ -1340,9 +1422,41 @@ void CUnit::DoDamage(
 	if (eventHandler.UnitPreDamaged(this, attacker, baseDamage, weaponDefID, projectileID, isParalyzer, &baseDamage, &impulseMult))
 		return;
 
+	if (replayCheckpointDebugDamage) {
+		LOG("[ReplayCheckpoint][unit-damage] after-pre frame=%d unit=%d projectile=%d weaponDef=%d base=%f impulseMult=%f",
+			gs->frameNum,
+			id,
+			projectileID,
+			weaponDefID,
+			baseDamage,
+			impulseMult
+		);
+	}
+
 	script->WorldHitByWeapon(-(impulse * impulseMult).SafeNormalize2D(), weaponDefID, /*inout*/ baseDamage);
+	if (replayCheckpointDebugDamage) {
+		LOG("[ReplayCheckpoint][unit-damage] after-script frame=%d unit=%d projectile=%d weaponDef=%d base=%f impulseMult=%f",
+			gs->frameNum,
+			id,
+			projectileID,
+			weaponDefID,
+			baseDamage,
+			impulseMult
+		);
+	}
+
 	ApplyImpulse((impulse * impulseMult) / mass);
 	ApplyDamage(attacker, damages, baseDamage, experienceMod);
+	if (replayCheckpointDebugDamage) {
+		LOG("[ReplayCheckpoint][unit-damage] after-apply frame=%d unit=%d projectile=%d weaponDef=%d health=%f base=%f",
+			gs->frameNum,
+			id,
+			projectileID,
+			weaponDefID,
+			health,
+			baseDamage
+		);
+	}
 
 	{
 		eventHandler.UnitDamaged(this, attacker, baseDamage, weaponDefID, projectileID, isParalyzer);

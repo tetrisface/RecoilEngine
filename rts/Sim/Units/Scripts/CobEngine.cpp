@@ -8,6 +8,10 @@
 #include "CobFile.h"
 
 #include <cstdint>
+#include "Sim/Misc/GlobalSynced.h"
+#include "Sim/Units/Unit.h"
+#include "System/Config/ConfigHandler.h"
+#include "System/Log/ILog.h"
 #include "System/Misc/TracyDefs.h"
 #include "Lua/LuaUI.h"
 
@@ -35,6 +39,171 @@ CR_REG_METADATA(CCobEngine::SleepingThread, (
 ))
 
 static const char* const numCobThreadsPlot = "CobThreads";
+static constexpr int REPLAY_CHECKPOINT_DEBUG_COB_UNIT_ID = 15919;
+
+static bool ReplayCheckpointDebugCobFrame()
+{
+	return (gs != nullptr && configHandler != nullptr && gs->frameNum == configHandler->GetInt("ReplayCheckpointDebugSignatureFrame"));
+}
+
+static int ReplayCheckpointCobOwnerID(const CCobThread* thread)
+{
+	if (thread == nullptr || thread->cobInst == nullptr || thread->cobInst->GetUnit() == nullptr)
+		return -1;
+
+	return thread->cobInst->GetUnit()->id;
+}
+
+static bool ReplayCheckpointShouldLogCobThread(const CCobThread* thread)
+{
+	return (ReplayCheckpointCobOwnerID(thread) == REPLAY_CHECKPOINT_DEBUG_COB_UNIT_ID);
+}
+
+static void LogReplayCheckpointCobThread(const char* phase, const CCobThread* thread, int currentTime)
+{
+	if (!ReplayCheckpointDebugCobFrame() || thread == nullptr || !ReplayCheckpointShouldLogCobThread(thread))
+		return;
+
+	LOG("[ReplayCheckpoint][cob] %s frame=%d time=%d id=%d owner=%d state=%d wake=%d pc=%d wait=%d|%d sig=%d call=%u|%08x data=%u|%08x lua=%08x",
+		phase,
+		gs->frameNum,
+		currentTime,
+		thread->GetID(),
+		ReplayCheckpointCobOwnerID(thread),
+		static_cast<int>(thread->GetState()),
+		thread->GetWakeTime(),
+		thread->GetProgramCounter(),
+		thread->GetWaitAxis(),
+		thread->GetWaitPiece(),
+		thread->GetSignalMask(),
+		static_cast<unsigned int>(thread->GetCallStackSize()),
+		thread->GetCallStackChecksum(),
+		static_cast<unsigned int>(thread->GetDataStackSize()),
+		thread->GetDataStackChecksum(),
+		thread->GetLuaArgsChecksum()
+	);
+}
+
+static void LogReplayCheckpointCobQueueIDs(const char* phase, const char* queueName, const std::vector<int>& threadIDs, CCobEngine* engine)
+{
+	if (!ReplayCheckpointDebugCobFrame())
+		return;
+
+	LOG("[ReplayCheckpoint][cob] %s frame=%d time=%d queue=%s count=%u",
+		phase,
+		gs->frameNum,
+		engine->GetCurrTime(),
+		queueName,
+		static_cast<unsigned int>(threadIDs.size())
+	);
+
+	for (size_t index = 0; index < threadIDs.size(); ++index) {
+		const int threadID = threadIDs[index];
+		const CCobThread* thread = engine->GetThread(threadID);
+		if (!ReplayCheckpointShouldLogCobThread(thread))
+			continue;
+
+		LOG("[ReplayCheckpoint][cob] %s frame=%d time=%d queue=%s index=%u id=%d owner=%d state=%d wake=%d pc=%d wait=%d|%d",
+			phase,
+			gs->frameNum,
+			engine->GetCurrTime(),
+			queueName,
+			static_cast<unsigned int>(index),
+			threadID,
+			ReplayCheckpointCobOwnerID(thread),
+			(thread != nullptr) ? static_cast<int>(thread->GetState()) : -1,
+			(thread != nullptr) ? thread->GetWakeTime() : -1,
+			(thread != nullptr) ? thread->GetProgramCounter() : -1,
+			(thread != nullptr) ? thread->GetWaitAxis() : -1,
+			(thread != nullptr) ? thread->GetWaitPiece() : -1
+		);
+	}
+}
+
+static void LogReplayCheckpointCobTickAdded(const char* phase, const std::vector<CCobThread>& threads, int currentTime)
+{
+	if (!ReplayCheckpointDebugCobFrame())
+		return;
+
+	LOG("[ReplayCheckpoint][cob] %s frame=%d time=%d queue=tickAdded count=%u",
+		phase,
+		gs->frameNum,
+		currentTime,
+		static_cast<unsigned int>(threads.size())
+	);
+
+	for (size_t index = 0; index < threads.size(); ++index) {
+		const CCobThread& thread = threads[index];
+		if (!ReplayCheckpointShouldLogCobThread(&thread))
+			continue;
+
+		LOG("[ReplayCheckpoint][cob] %s frame=%d time=%d queue=tickAdded index=%u id=%d owner=%d state=%d wake=%d pc=%d wait=%d|%d",
+			phase,
+			gs->frameNum,
+			currentTime,
+			static_cast<unsigned int>(index),
+			thread.GetID(),
+			ReplayCheckpointCobOwnerID(&thread),
+			static_cast<int>(thread.GetState()),
+			thread.GetWakeTime(),
+			thread.GetProgramCounter(),
+			thread.GetWaitAxis(),
+			thread.GetWaitPiece()
+		);
+	}
+}
+
+static void LogReplayCheckpointCobQueues(const char* phase, CCobEngine* engine)
+{
+	if (!ReplayCheckpointDebugCobFrame())
+		return;
+
+	LOG("[ReplayCheckpoint][cob] %s frame=%d time=%d threads=%u running=%u waiting=%u sleeping=%u tickAdded=%u tickRemoved=%u counter=%d",
+		phase,
+		gs->frameNum,
+		engine->GetCurrTime(),
+		static_cast<unsigned int>(engine->GetThreadInstances().size()),
+		static_cast<unsigned int>(engine->GetRunningThreadIDs().size()),
+		static_cast<unsigned int>(engine->GetWaitingThreadIDs().size()),
+		static_cast<unsigned int>(engine->GetSleepingThreadIDs().size()),
+		static_cast<unsigned int>(engine->GetTickAddedThreads().size()),
+		static_cast<unsigned int>(engine->GetTickRemovedThreads().size()),
+		engine->GetThreadCounter()
+	);
+
+	LogReplayCheckpointCobQueueIDs(phase, "running", engine->GetRunningThreadIDs(), engine);
+	LogReplayCheckpointCobQueueIDs(phase, "waiting", engine->GetWaitingThreadIDs(), engine);
+	LogReplayCheckpointCobTickAdded(phase, engine->GetTickAddedThreads(), engine->GetCurrTime());
+	LogReplayCheckpointCobQueueIDs(phase, "tickRemoved", engine->GetTickRemovedThreads(), engine);
+
+	auto sleepingThreads = engine->GetSleepingThreadIDs();
+	unsigned int index = 0;
+	while (!sleepingThreads.empty()) {
+		const CCobEngine::SleepingThread sleeper = sleepingThreads.top();
+		sleepingThreads.pop();
+
+		const CCobThread* thread = engine->GetThread(sleeper.id);
+		if (!ReplayCheckpointShouldLogCobThread(thread)) {
+			++index;
+			continue;
+		}
+
+		LOG("[ReplayCheckpoint][cob] %s frame=%d time=%d queue=sleeping index=%u id=%d storedWake=%d owner=%d state=%d wake=%d pc=%d wait=%d|%d",
+			phase,
+			gs->frameNum,
+			engine->GetCurrTime(),
+			index++,
+			sleeper.id,
+			sleeper.wt,
+			ReplayCheckpointCobOwnerID(thread),
+			(thread != nullptr) ? static_cast<int>(thread->GetState()) : -1,
+			(thread != nullptr) ? thread->GetWakeTime() : -1,
+			(thread != nullptr) ? thread->GetProgramCounter() : -1,
+			(thread != nullptr) ? thread->GetWaitAxis() : -1,
+			(thread != nullptr) ? thread->GetWaitPiece() : -1
+		);
+	}
+}
 
 int CCobEngine::AddThread(CCobThread&& thread)
 {
@@ -42,12 +211,15 @@ int CCobEngine::AddThread(CCobThread&& thread)
 	if (thread.GetID() == -1)
 		thread.SetID(GenThreadID());
 
+	LogReplayCheckpointCobThread("add-before", &thread, currentTime);
+
 	CCobInstance* o = thread.cobInst;
 	CCobThread& t = threadInstances[thread.GetID()];
 
 	// move thread into registry, hand its ID to owner
 	t = std::move(thread);
 	o->AddThreadID(t.GetID());
+	LogReplayCheckpointCobThread("add-after", &t, currentTime);
 
 	TracyPlot(numCobThreadsPlot, static_cast<int64_t>(threadInstances.size()));
 
@@ -91,6 +263,7 @@ void CCobEngine::ProcessQueuedThreads() {
 void CCobEngine::ScheduleThread(const CCobThread* thread)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
+	LogReplayCheckpointCobThread("schedule", thread, currentTime);
 	switch (thread->GetState()) {
 		case CCobThread::Run: {
 			waitingThreadIDs.push_back(thread->GetID());
@@ -122,12 +295,17 @@ void CCobEngine::SanityCheckThreads(const CCobInstance* owner)
 void CCobEngine::TickThread(CCobThread* thread)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
+	LogReplayCheckpointCobThread("tick-thread-begin", thread, currentTime);
 	// for error messages originating in CUnitScript
 	curThread = thread;
 
 	// NB: threadID is still in <runningThreadIDs> here, TickRunningThreads clears it
-	if (thread != nullptr && !thread->Tick())
+	if (thread != nullptr && !thread->Tick()) {
+		LogReplayCheckpointCobThread("tick-thread-dead", thread, currentTime);
 		RemoveThread(thread->GetID());
+	} else {
+		LogReplayCheckpointCobThread("tick-thread-end", thread, currentTime);
+	}
 
 	curThread = nullptr;
 }
@@ -137,7 +315,19 @@ void CCobEngine::WakeSleepingThreads()
 	ZoneScoped;
 	// check on the sleeping threads, remove any whose owner died
 	while (!sleepingThreadIDs.empty()) {
-		CCobThread* zzzThread = GetThread((sleepingThreadIDs.top()).id);
+		const SleepingThread sleeper = sleepingThreadIDs.top();
+		CCobThread* zzzThread = GetThread(sleeper.id);
+		if (ReplayCheckpointDebugCobFrame() && (zzzThread == nullptr || ReplayCheckpointShouldLogCobThread(zzzThread))) {
+			LOG("[ReplayCheckpoint][cob] wake-top frame=%d time=%d id=%d storedWake=%d owner=%d state=%d wake=%d",
+				gs->frameNum,
+				currentTime,
+				sleeper.id,
+				sleeper.wt,
+				ReplayCheckpointCobOwnerID(zzzThread),
+				(zzzThread != nullptr) ? static_cast<int>(zzzThread->GetState()) : -1,
+				(zzzThread != nullptr) ? zzzThread->GetWakeTime() : -1
+			);
+		}
 
 		if (zzzThread == nullptr) {
 			sleepingThreadIDs.pop();
@@ -190,13 +380,18 @@ void CCobEngine::TickRunningThreads()
 void CCobEngine::Tick(int deltaTime)
 {
 	ZoneScoped;
+	LogReplayCheckpointCobQueues("tick-start", this);
 	currentTime += deltaTime;
+	LogReplayCheckpointCobQueues("after-time", this);
 
 	TickRunningThreads();
+	LogReplayCheckpointCobQueues("after-running", this);
 	ProcessQueuedThreads();
 
 	WakeSleepingThreads();
+	LogReplayCheckpointCobQueues("after-wake", this);
 	ProcessQueuedThreads();
+	LogReplayCheckpointCobQueues("tick-end", this);
 }
 
 

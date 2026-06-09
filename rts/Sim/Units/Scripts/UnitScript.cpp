@@ -43,6 +43,7 @@
 #include "Sim/Weapons/WeaponDef.h"
 #include "Rendering/Models/3DModel.hpp"
 #include "Rendering/Models/3DModelPiece.hpp"
+#include "System/Config/ConfigHandler.h"
 #include "System/FastMath.h"
 #include "System/SpringMath.h"
 #include "System/Log/ILog.h"
@@ -82,6 +83,19 @@ CR_REG_METADATA_SUB(CUnitScript, AnimInfo,(
 	CR_MEMBER(done),
 	CR_MEMBER(hasWaiting)
 ))
+
+static constexpr int REPLAY_CHECKPOINT_DEBUG_UNIT_SCRIPT_ANIM_UNIT_ID = 15919;
+
+static bool ReplayCheckpointDebugUnitScriptAnimFrame(const CUnit* unit)
+{
+	return (
+		gs != nullptr &&
+		configHandler != nullptr &&
+		gs->frameNum == configHandler->GetInt("ReplayCheckpointDebugSignatureFrame") &&
+		unit != nullptr &&
+		unit->id == REPLAY_CHECKPOINT_DEBUG_UNIT_SCRIPT_ANIM_UNIT_ID
+	);
+}
 
 
 CUnitScript::CUnitScript(CUnit* unit)
@@ -355,6 +369,20 @@ void CUnitScript::RemoveAnim(AnimType type, const AnimContainerTypeIt& animInfoI
 		return;
 
 	AnimInfo& ai = *animInfoIt;
+	const bool replayCheckpointDebug = ReplayCheckpointDebugUnitScriptAnimFrame(unit);
+
+	if (replayCheckpointDebug) {
+		LOG("[ReplayCheckpoint][unit-script-anim] remove frame=%d unit=%d type=%d piece=%d axis=%d liveBefore=%u checksum=%08x hasWaiting=%d",
+			gs->frameNum,
+			(unit != nullptr) ? unit->id : -1,
+			static_cast<int>(type),
+			ai.piece,
+			ai.axis,
+			static_cast<unsigned int>(anims.size()),
+			checksum,
+			static_cast<int>(ai.hasWaiting)
+		);
+	}
 
 	// We need to unblock threads waiting on this animation, otherwise they will be lost in the void
 	// NOTE: AnimFinished might result in new anims being added
@@ -363,6 +391,16 @@ void CUnitScript::RemoveAnim(AnimType type, const AnimContainerTypeIt& animInfoI
 
 	ai = anims.back();
 	anims.pop_back();
+
+	if (replayCheckpointDebug) {
+		LOG("[ReplayCheckpoint][unit-script-anim] remove-done frame=%d unit=%d type=%d liveAfter=%u checksum=%08x",
+			gs->frameNum,
+			(unit != nullptr) ? unit->id : -1,
+			static_cast<int>(type),
+			static_cast<unsigned int>(anims.size()),
+			checksum
+		);
+	}
 
 	// If this was the last animation, remove from currently animating list
 	// FIXME: this could be done in a cleaner way
@@ -379,6 +417,8 @@ void CUnitScript::RemoveAnim(AnimType type, const AnimContainerTypeIt& animInfoI
 void CUnitScript::AddAnim(AnimType type, int piece, int axis, float speed, float dest, float accel)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
+	const bool replayCheckpointDebug = ReplayCheckpointDebugUnitScriptAnimFrame(unit);
+	const unsigned int liveBefore = static_cast<unsigned int>(anims.size());
 	auto* p = SafeGetPiece(piece);
 	if (!p) {
 		ShowUnitScriptError("[US::AddAnim] invalid script piece index");
@@ -431,6 +471,7 @@ void CUnitScript::AddAnim(AnimType type, int piece, int axis, float speed, float
 
 	// now find an animation of our own type
 	animInfoIt = FindAnim(type, piece, axis);
+	const bool replacedAnim = (animInfoIt != anims.end());
 
 	if (animInfoIt == anims.end()) {
 		// If we were not animating before, inform the engine of this so it can schedule us
@@ -450,6 +491,23 @@ void CUnitScript::AddAnim(AnimType type, int piece, int axis, float speed, float
 	ai->speed = speed;
 	ai->accel = accel;
 	ai->done = false;
+
+	if (replayCheckpointDebug) {
+		LOG("[ReplayCheckpoint][unit-script-anim] add frame=%d unit=%d type=%d piece=%d axis=%d speed=%f dest=%f accel=%f replaced=%d liveBefore=%u liveAfter=%u checksum=%08x",
+			gs->frameNum,
+			(unit != nullptr) ? unit->id : -1,
+			static_cast<int>(type),
+			piece,
+			axis,
+			speed,
+			destf,
+			accel,
+			static_cast<int>(replacedAnim),
+			liveBefore,
+			static_cast<unsigned int>(anims.size()),
+			checksum
+		);
+	}
 }
 
 
@@ -1812,4 +1870,3 @@ void CUnitScript::ShowUnitScriptError(const std::string& error)
 		ShowScriptError("unitID=" + IntToString(unit->id) + " defName=" + unit->unitDef->name + " error=\"" + error + "\"");
 	}
 }
-

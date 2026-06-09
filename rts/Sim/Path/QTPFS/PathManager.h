@@ -56,8 +56,11 @@ namespace QTPFS {
 		void UpdatePath(const CSolidObject* owner, unsigned int pathID) override;
 		void DeletePath(unsigned int pathID, bool force = false) override;
 		void ResetLivePathsForLoad() override;
+		void RebuildReplayCheckpointNodeLayersForLoad() override;
+		bool RestoreReplayCheckpointPathsForLoad() override;
 		void RestoreReplayCheckpointPathAllocator() override;
 		void SerializeReplayCheckpointState(creg::ISerializer* s) override;
+		void LogReplayCheckpointStateSignature(const char* label) const override;
 		void DeletePathEntity(QTPFS::entity pathEntity);
 
 		unsigned int RequestPath(
@@ -111,6 +114,70 @@ namespace QTPFS {
 		void RemovePathFromPartialShared(QTPFS::entity entity);
 
 	private:
+		struct ReplayCheckpointPathNodeState {
+			uint32_t nodeId = -1U;
+			uint32_t nodeNumber = -1U;
+			float2 netPoint;
+			int pathPointIndex = -1;
+			int xmin = 0;
+			int zmin = 0;
+			int xmax = 0;
+			int zmax = 0;
+			bool badNode = false;
+		};
+
+		struct ReplayCheckpointPathState {
+			QTPFS::entity entity = entt::null;
+			bool hasOwner = false;
+			uint32_t ownerID = 0;
+			uint32_t pathID = 0;
+			uint32_t nextPointIndex = 0;
+			uint32_t repathTriggerIndex = 0;
+			uint32_t numPathUpdates = 0;
+			uint32_t firstCleanNodeID = 0;
+			PathHashType hash = BAD_HASH;
+			PathHashType virtualHash = BAD_HASH;
+			float radius = 0.0f;
+			float3 boundingBoxMins;
+			float3 boundingBoxMaxs;
+			float3 goalPosition;
+			spring_time searchTime;
+			int pathType = 0;
+			bool synced = true;
+			bool fullPath = true;
+			bool partialPath = false;
+			bool rawPath = false;
+			bool boundingBoxOverride = false;
+			bool unsyncedPath = false;
+			bool externalPath = false;
+			bool dirty = false;
+			bool temp = false;
+			bool toBeUpdated = false;
+			bool updatedCounterIncrease = false;
+			bool requeueSearch = false;
+			bool requeueSearchValue = false;
+			bool searchModePath = false;
+			bool delayedDelete = false;
+			int delayedDeleteFrame = 0;
+			bool sharedPathChain = false;
+			bool sharedPathHead = false;
+			QTPFS::entity sharedPrev = entt::null;
+			QTPFS::entity sharedNext = entt::null;
+			bool partialSharedPathChain = false;
+			bool partialSharedPathHead = false;
+			QTPFS::entity partialSharedPrev = entt::null;
+			QTPFS::entity partialSharedNext = entt::null;
+			std::vector<float3> points;
+			std::vector<ReplayCheckpointPathNodeState> nodes;
+		};
+
+		void CaptureReplayCheckpointPathStates();
+		void CaptureReplayCheckpointEmptyEntities();
+		void SerializeReplayCheckpointPathState(creg::ISerializer* s, ReplayCheckpointPathState& state);
+		void RestoreReplayCheckpointSharedPathCaches();
+		void RestoreReplayCheckpointPathComponentOrder();
+		void PruneReplayCheckpointExtraEmptyEntities();
+
 		void MapChanged(int x1, int z1, int x2, int z2);
 
 		void ThreadUpdate();
@@ -135,7 +202,7 @@ namespace QTPFS {
 		typedef std::vector<PathSearch*> PathSearchVect;
 		typedef std::vector<PathSearch*>::iterator PathSearchVectIt;
 
-		void InitNodeLayersThreaded(const SRectangle& rect);
+		void InitNodeLayersThreaded(const SRectangle& rect, bool reportLoadScreen = true);
 		void InitNodeLayer(unsigned int layerNum, const SRectangle& r);
 		void InitRootSize(const SRectangle& r);
 		void UpdateNodeLayer(unsigned int layerNum, const SRectangle& r, int currentThread);
@@ -144,8 +211,9 @@ namespace QTPFS {
 		void RemovePathSearch(QTPFS::entity pathEntity);
 
 		void ReadyQueuedSearches();
-		void ProcessPathSearch(int i, bool shouldBeRaw);
+		void ProcessPathSearch(QTPFS::entity pathSearchEntity, bool shouldBeRaw);
 		void ExecuteQueuedSearches();
+		void NormalizePathAllocatorFreeList();
 		void QueueDeadPathSearches();
 
 		unsigned int QueueSearch(
@@ -218,8 +286,11 @@ namespace QTPFS {
 
 		QTPFS::entity systemEntity = entt::null;
 		std::vector<QTPFS::entity> replayCheckpointRegistryEntities;
+		std::vector<QTPFS::entity> replayCheckpointEmptyEntities;
+		std::vector<ReplayCheckpointPathState> replayCheckpointPathStates;
 		QTPFS::entity replayCheckpointRegistryReleased = entt::null;
 		bool replayCheckpointRegistryLoaded = false;
+		bool replayCheckpointPathStatesLoaded = false;
 
 		bool isFinalized = false;
 

@@ -27,6 +27,7 @@
 #include "Sim/Weapons/Cannon.h"
 #include "Sim/Weapons/NoWeapon.h"
 #include "System/EventHandler.h"
+#include "System/Config/ConfigHandler.h"
 #include "System/SpringMath.h"
 #include "System/creg/DefTypes.h"
 #include "System/Sound/ISoundChannels.h"
@@ -35,6 +36,12 @@
 #include "System/Misc/TracyDefs.h"
 
 //constexpr float SAFE_INTERCEPT_EPS = (1.0 / 65536);
+
+static bool ReplayCheckpointDebugWeaponFrame()
+{
+	const int debugFrame = configHandler->GetInt("ReplayCheckpointDebugSignatureFrame");
+	return (debugFrame >= 0 && gs != nullptr && gs->frameNum == debugFrame);
+}
 
 CR_BIND_DERIVED_POOL(CWeapon, CObject, , weaponMemPool.allocMem, weaponMemPool.freeMem)
 CR_REG_METADATA(CWeapon, (
@@ -1259,6 +1266,49 @@ void CWeapon::Fire(bool scriptCall)
 
 	if (qfAddUnit)
 		qfHasUnit = quadField.InsertUnitIf(currentTarget.unit, currentTargetPos);
+
+	if (ReplayCheckpointDebugWeaponFrame()) {
+		const CUnit* targetUnit = HaveUnitTarget() ? currentTarget.unit : nullptr;
+		const CWeaponProjectile* targetProjectile = (currentTarget.type == Target_Intercept) ? currentTarget.intercept : nullptr;
+		const float3 targetPos = (targetUnit != nullptr) ? targetUnit->pos : ZeroVector;
+		const float4 targetSpeed = (targetUnit != nullptr) ? targetUnit->speed : ZeroVector;
+		const float3 targetAimPos = (targetUnit != nullptr) ? float3(targetUnit->aimPos.x, targetUnit->aimPos.y, targetUnit->aimPos.z) : ZeroVector;
+		const float3 interceptPos = (targetProjectile != nullptr) ? targetProjectile->pos : ZeroVector;
+		const float4 interceptSpeed = (targetProjectile != nullptr) ? targetProjectile->speed : ZeroVector;
+		const float3 ownerFront = float3(owner->frontdir.x, owner->frontdir.y, owner->frontdir.z);
+		const float3 ownerRight = float3(owner->rightdir.x, owner->rightdir.y, owner->rightdir.z);
+		const float3 ownerUp = float3(owner->updir.x, owner->updir.y, owner->updir.z);
+
+		LOG("[ReplayCheckpoint][weapon-fire] frame=%d owner=%d weapon=%d def=%u script=%u targetType=%d targetUnit=%d targetProjectile=%d currentTarget=<%.8g,%.8g,%.8g> aim=<%.8g,%.8g,%.8g> muzzle=<%.8g,%.8g,%.8g> wanted=<%.8g,%.8g,%.8g> weaponDir=<%.8g,%.8g,%.8g> projectileSpeed=%.8g range=%.8g predict=%.8g error=<%.8g,%.8g,%.8g> salvoError=<%.8g,%.8g,%.8g> targetPos=<%.8g,%.8g,%.8g> targetSpeed=<%.8g,%.8g,%.8g,%.8g> targetAim=<%.8g,%.8g,%.8g> interceptPos=<%.8g,%.8g,%.8g> interceptSpeed=<%.8g,%.8g,%.8g,%.8g> ownerPos=<%.8g,%.8g,%.8g> ownerSpeed=<%.8g,%.8g,%.8g,%.8g> ownerFront=<%.8g,%.8g,%.8g> ownerRight=<%.8g,%.8g,%.8g> ownerUp=<%.8g,%.8g,%.8g>",
+			gs->frameNum,
+			owner->id,
+			weaponNum,
+			weaponDef != nullptr ? weaponDef->id : 0u,
+			scriptCall ? 1u : 0u,
+			static_cast<int>(currentTarget.type),
+			targetUnit != nullptr ? targetUnit->id : -1,
+			targetProjectile != nullptr ? targetProjectile->id : -1,
+			currentTargetPos.x, currentTargetPos.y, currentTargetPos.z,
+			aimFromPos.x, aimFromPos.y, aimFromPos.z,
+			weaponMuzzlePos.x, weaponMuzzlePos.y, weaponMuzzlePos.z,
+			wantedDir.x, wantedDir.y, wantedDir.z,
+			weaponDir.x, weaponDir.y, weaponDir.z,
+			projectileSpeed,
+			range,
+			predictSpeedMod,
+			errorVector.x, errorVector.y, errorVector.z,
+			salvoError.x, salvoError.y, salvoError.z,
+			targetPos.x, targetPos.y, targetPos.z,
+			targetSpeed.x, targetSpeed.y, targetSpeed.z, targetSpeed.w,
+			targetAimPos.x, targetAimPos.y, targetAimPos.z,
+			interceptPos.x, interceptPos.y, interceptPos.z,
+			interceptSpeed.x, interceptSpeed.y, interceptSpeed.z, interceptSpeed.w,
+			owner->pos.x, owner->pos.y, owner->pos.z,
+			owner->speed.x, owner->speed.y, owner->speed.z, owner->speed.w,
+			ownerFront.x, ownerFront.y, ownerFront.z,
+			ownerRight.x, ownerRight.y, ownerRight.z,
+			ownerUp.x, ownerUp.y, ownerUp.z);
+	}
 
 	FireImpl(scriptCall);
 

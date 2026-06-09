@@ -31,8 +31,10 @@
 #include "System/Log/ILog.h"
 #include "System/SafeUtil.h"
 #include "System/StringUtil.h"
+#include "System/Sync/SyncChecker.h"
 #include "System/creg/STL_Set.h"
 #include "System/creg/STL_Deque.h"
+#include <algorithm>
 #include <assert.h>
 
 #include "System/Misc/TracyDefs.h"
@@ -63,6 +65,67 @@ static int ReplayCheckpointDebugCommandParam0(const Command& c)
 static int ReplayCheckpointDebugUnitId(const CUnit* unit)
 {
 	return (unit != nullptr) ? unit->id : -1;
+}
+
+static float ReplayCheckpointDebugCommandParam(const Command& c, unsigned int index)
+{
+	return (c.GetNumParams() > index) ? c.GetParam(index) : 0.0f;
+}
+
+static void LogReplayCheckpointCommand(const char* label, const CUnit* owner, const Command& c, unsigned int queueIndex)
+{
+	if (!ReplayCheckpointDebugCommandAIFrame())
+		return;
+
+	LOG("[ReplayCheckpoint][CommandAI] %s frame=%d unit=%d qidx=%u sync=%08x rng=%llu cmd=%d tag=%u opts=%u timeout=%d params=%u p=<%.8g,%.8g,%.8g,%.8g,%.8g,%.8g,%.8g,%.8g>",
+		label,
+		gs->frameNum,
+		ReplayCheckpointDebugUnitId(owner),
+		queueIndex,
+		CSyncChecker::GetChecksum(),
+		static_cast<unsigned long long>(gsRNG.GetGenState()),
+		c.GetID(),
+		c.GetTag(),
+		c.GetOpts(),
+		c.GetTimeOut(),
+		c.GetNumParams(),
+		ReplayCheckpointDebugCommandParam(c, 0),
+		ReplayCheckpointDebugCommandParam(c, 1),
+		ReplayCheckpointDebugCommandParam(c, 2),
+		ReplayCheckpointDebugCommandParam(c, 3),
+		ReplayCheckpointDebugCommandParam(c, 4),
+		ReplayCheckpointDebugCommandParam(c, 5),
+		ReplayCheckpointDebugCommandParam(c, 6),
+		ReplayCheckpointDebugCommandParam(c, 7)
+	);
+}
+
+static void LogReplayCheckpointCommandQueue(const char* label, const CUnit* owner, const CCommandQueue& queue)
+{
+	if (!ReplayCheckpointDebugCommandAIFrame())
+		return;
+
+	const unsigned int logCount = std::min<unsigned int>(static_cast<unsigned int>(queue.size()), 8u);
+	for (unsigned int i = 0; i < logCount; ++i)
+		LogReplayCheckpointCommand(label, owner, queue[i], i);
+}
+
+static void LogReplayCheckpointCommandBoundary(const char* label, const CUnit* owner, const CCommandQueue& queue)
+{
+	if (!ReplayCheckpointDebugCommandAIFrame())
+		return;
+
+	LOG("[ReplayCheckpoint][CommandAI] %s frame=%d unit=%d sync=%08x rng=%llu queue=%u frontCmd=%d frontTag=%u frontParam0=%d",
+		label,
+		gs->frameNum,
+		ReplayCheckpointDebugUnitId(owner),
+		CSyncChecker::GetChecksum(),
+		static_cast<unsigned long long>(gsRNG.GetGenState()),
+		static_cast<unsigned int>(queue.size()),
+		queue.empty() ? CMD_STOP : queue.front().GetID(),
+		queue.empty() ? 0u : queue.front().GetTag(),
+		queue.empty() ? -1 : ReplayCheckpointDebugCommandParam0(queue.front())
+	);
 }
 
 void CCommandAI::InitCommandDescriptionCache() { commandDescriptionCache.Init(); }
@@ -1806,20 +1869,25 @@ void CCommandAI::FinishCommand()
 			targetDied,
 			ReplayCheckpointDebugUnitId(orderTarget),
 			lastFinishCommand);
+		LogReplayCheckpointCommand("finish-enter-front", owner, cmd, 0);
+		LogReplayCheckpointCommandQueue("finish-enter-queue", owner, commandQue);
 	}
 
 	const bool dontRepeat = (cmd.IsInternalOrder());
 	const bool pushCommand = (cmd.GetID() != CMD_STOP && cmd.GetID() != CMD_PATROL);
 
+	LogReplayCheckpointCommandBoundary("finish-before-repeat-pop", owner, commandQue);
 	if (repeatOrders && !dontRepeat && pushCommand)
 		commandQue.push_back(cmd);
 
 	commandQue.pop_front();
+	LogReplayCheckpointCommandBoundary("finish-after-raw-pop", owner, commandQue);
 
 	inCommand = CMD_STOP;
 	targetDied = false;
 
 	SetOrderTarget(nullptr);
+	LogReplayCheckpointCommandBoundary("finish-after-clear-order-target", owner, commandQue);
 
 	if (replayCheckpointDebug) {
 		LOG("[ReplayCheckpoint][CommandAI] finish-after-pop frame=%d unit=%d finishedCmd=%d finishedTag=%u queue=%u frontCmd=%d frontTag=%u frontParam0=%d",
@@ -1831,11 +1899,16 @@ void CCommandAI::FinishCommand()
 			commandQue.empty() ? CMD_STOP : commandQue.front().GetID(),
 			commandQue.empty() ? 0u : commandQue.front().GetTag(),
 			commandQue.empty() ? -1 : ReplayCheckpointDebugCommandParam0(commandQue.front()));
+		LogReplayCheckpointCommandQueue("finish-after-pop-queue", owner, commandQue);
 	}
 
+	LogReplayCheckpointCommandBoundary("finish-before-eoh-command-finished", owner, commandQue);
 	eoh->CommandFinished(*owner, cmd);
+	LogReplayCheckpointCommandBoundary("finish-after-eoh-command-finished", owner, commandQue);
 	eventHandler.UnitCmdDone(owner, cmd);
+	LogReplayCheckpointCommandBoundary("finish-after-unit-cmd-done", owner, commandQue);
 	ClearTargetLock(cmd);
+	LogReplayCheckpointCommandBoundary("finish-after-clear-target-lock", owner, commandQue);
 
 	if (replayCheckpointDebug) {
 		LOG("[ReplayCheckpoint][CommandAI] finish-after-cmddone frame=%d unit=%d finishedCmd=%d finishedTag=%u queue=%u frontCmd=%d frontTag=%u frontParam0=%d",
@@ -1847,13 +1920,16 @@ void CCommandAI::FinishCommand()
 			commandQue.empty() ? CMD_STOP : commandQue.front().GetID(),
 			commandQue.empty() ? 0u : commandQue.front().GetTag(),
 			commandQue.empty() ? -1 : ReplayCheckpointDebugCommandParam0(commandQue.front()));
+		LogReplayCheckpointCommandQueue("finish-after-cmddone-queue", owner, commandQue);
 	}
 
 	if (commandQue.empty()) {
+		LogReplayCheckpointCommandBoundary("finish-before-idle", owner, commandQue);
 		if (owner->GetGroup() == nullptr)
 			eoh->UnitIdle(*owner);
 
 		eventHandler.UnitIdle(owner);
+		LogReplayCheckpointCommandBoundary("finish-after-idle", owner, commandQue);
 
 		if (replayCheckpointDebug) {
 			LOG("[ReplayCheckpoint][CommandAI] finish-after-idle frame=%d unit=%d finishedCmd=%d finishedTag=%u queue=%u frontCmd=%d frontTag=%u frontParam0=%d",
@@ -1892,7 +1968,9 @@ void CCommandAI::FinishCommand()
 		return;
 	}
 
+	LogReplayCheckpointCommandBoundary("finish-before-recursive-slow-update", owner, commandQue);
 	SlowUpdate();
+	LogReplayCheckpointCommandBoundary("finish-after-recursive-slow-update", owner, commandQue);
 }
 
 void CCommandAI::AddStockpileWeapon(CWeapon* weapon)

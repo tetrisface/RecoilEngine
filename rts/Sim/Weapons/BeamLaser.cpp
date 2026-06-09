@@ -6,6 +6,9 @@
 #include "Game/GameHelper.h"
 #include "Game/TraceRay.h"
 #include "Map/Ground.h"
+#include "Rendering/Models/3DModelPiece.hpp"
+#include "Rendering/Models/LocalModelPiece.hpp"
+#include "Sim/Features/Feature.h"
 #include "Sim/Misc/CollisionHandler.h"
 #include "Sim/Misc/GlobalSynced.h"
 #include "Sim/Misc/TeamHandler.h"
@@ -14,14 +17,39 @@
 #include "Sim/Units/Scripts/UnitScript.h"
 #include "Sim/Units/Unit.h"
 #include "Sim/Units/UnitDef.h"
+#include "System/Config/ConfigHandler.h"
+#include "System/Log/ILog.h"
 #include "System/Matrix44f.h"
 #include "System/SpringMath.h"
 
 #include "System/Misc/TracyDefs.h"
 
+#include <cstdint>
+#include <cstring>
 #include <vector>
 
 #define SWEEPFIRE_ENABLED 1
+
+static bool ReplayCheckpointDebugBeamLaserFrame()
+{
+	const int debugFrame = configHandler->GetInt("ReplayCheckpointDebugSignatureFrame");
+	return (debugFrame >= 0 && gs != nullptr && gs->frameNum == debugFrame);
+}
+
+static uint32_t ReplayCheckpointBeamFloatBits(float value)
+{
+	uint32_t bits = 0;
+	std::memcpy(&bits, &value, sizeof(bits));
+	return bits;
+}
+
+static const char* ReplayCheckpointBeamPieceName(const LocalModelPiece* piece)
+{
+	if (piece == nullptr || piece->original == nullptr)
+		return "";
+
+	return piece->original->name.c_str();
+}
 
 CR_BIND_DERIVED(CBeamLaser, CWeapon, )
 
@@ -320,21 +348,121 @@ void CBeamLaser::FireInternal(float3 curDir)
 	static std::vector<TraceRay::SShieldDist> hitShields;
 	CollisionQuery hitColQuery;
 
+	const bool debugBeamLaserFrame = ReplayCheckpointDebugBeamLaserFrame();
+
 	if (!sweepFireState.IsSweepFiring()) {
-		curDir += (gsRNG.NextVector() * SprayAngleExperience());
+		const uint64_t rngStateBefore = gsRNG.GetGenState();
+		const uint64_t rngSeqBefore = gsRNG.GetGenSequence();
+		const float3 sprayVector = gsRNG.NextVector();
+		const float sprayAngle = SprayAngleExperience();
+		curDir += (sprayVector * sprayAngle);
 		curDir.SafeNormalize();
 
 		maxLength = GetShapedWeaponRange(curDir, maxLength);
+
+		if (debugBeamLaserFrame) {
+			LOG("[ReplayCheckpoint][beamlaser] spray frame=%d owner=%d weapon=%d def=%u rngBefore=%llu/%llu rngAfter=%llu/%llu sprayAngle=%.9g sprayAngleBits=%08x spray=<%.9g,%.9g,%.9g> sprayBits=<%08x,%08x,%08x> curDir=<%.9g,%.9g,%.9g> curDirBits=<%08x,%08x,%08x> maxLength=%.9g maxLengthBits=%08x muzzle=<%.9g,%.9g,%.9g> target=<%.9g,%.9g,%.9g>",
+				gs->frameNum,
+				owner->id,
+				weaponNum,
+				weaponDef != nullptr ? weaponDef->id : 0u,
+				static_cast<unsigned long long>(rngStateBefore),
+				static_cast<unsigned long long>(rngSeqBefore),
+				static_cast<unsigned long long>(gsRNG.GetGenState()),
+				static_cast<unsigned long long>(gsRNG.GetGenSequence()),
+				sprayAngle,
+				ReplayCheckpointBeamFloatBits(sprayAngle),
+				sprayVector.x, sprayVector.y, sprayVector.z,
+				ReplayCheckpointBeamFloatBits(sprayVector.x),
+				ReplayCheckpointBeamFloatBits(sprayVector.y),
+				ReplayCheckpointBeamFloatBits(sprayVector.z),
+				curDir.x, curDir.y, curDir.z,
+				ReplayCheckpointBeamFloatBits(curDir.x),
+				ReplayCheckpointBeamFloatBits(curDir.y),
+				ReplayCheckpointBeamFloatBits(curDir.z),
+				maxLength,
+				ReplayCheckpointBeamFloatBits(maxLength),
+				weaponMuzzlePos.x, weaponMuzzlePos.y, weaponMuzzlePos.z,
+				currentTargetPos.x, currentTargetPos.y, currentTargetPos.z);
+		}
 	}
 	else {
 		// restrict the range when sweeping
 		maxLength = std::min(maxLength, sweepFireState.GetTargetDist3D() * 1.125f);
+
+		if (debugBeamLaserFrame) {
+			LOG("[ReplayCheckpoint][beamlaser] sweep frame=%d owner=%d weapon=%d def=%u curDir=<%.9g,%.9g,%.9g> curDirBits=<%08x,%08x,%08x> maxLength=%.9g maxLengthBits=%08x muzzle=<%.9g,%.9g,%.9g> target=<%.9g,%.9g,%.9g>",
+				gs->frameNum,
+				owner->id,
+				weaponNum,
+				weaponDef != nullptr ? weaponDef->id : 0u,
+				curDir.x, curDir.y, curDir.z,
+				ReplayCheckpointBeamFloatBits(curDir.x),
+				ReplayCheckpointBeamFloatBits(curDir.y),
+				ReplayCheckpointBeamFloatBits(curDir.z),
+				maxLength,
+				ReplayCheckpointBeamFloatBits(maxLength),
+				weaponMuzzlePos.x, weaponMuzzlePos.y, weaponMuzzlePos.z,
+				currentTargetPos.x, currentTargetPos.y, currentTargetPos.z);
+		}
 	}
 
 
 	uint32_t lastProjID = -1;
 	for (int tries = 0; tries < 5 && tryAgain; ++tries) {
 		float beamLength = TraceRay::TraceRay(curPos, curDir, maxLength - curLength, collisionFlags, owner, hitUnit, hitFeature, &hitColQuery);
+		const float rawBeamLength = beamLength;
+		const CUnit* rawHitUnit = hitUnit;
+		const CFeature* rawHitFeature = hitFeature;
+		const LocalModelPiece* rawHitPiece = hitColQuery.GetHitPiece();
+		const float3 rawHitPos = hitColQuery.GetHitPos();
+
+		if (debugBeamLaserFrame) {
+			const Transform* pieceTransform = (rawHitPiece != nullptr) ? &rawHitPiece->GetModelSpaceTransformRaw() : nullptr;
+			const float3 piecePos = (rawHitPiece != nullptr) ? rawHitPiece->GetPosition() : ZeroVector;
+			const float3 pieceRot = (rawHitPiece != nullptr) ? rawHitPiece->GetRotation() : ZeroVector;
+			const float pieceScale = (rawHitPiece != nullptr) ? rawHitPiece->GetScaling() : 0.0f;
+			const float3 pieceTraPos = (pieceTransform != nullptr) ? pieceTransform->t : ZeroVector;
+			const CQuaternion pieceTraRot = (pieceTransform != nullptr) ? pieceTransform->r : CQuaternion();
+			const float pieceTraScale = (pieceTransform != nullptr) ? pieceTransform->s : 0.0f;
+
+			LOG("[ReplayCheckpoint][beamlaser] trace frame=%d owner=%d weapon=%d def=%u try=%d curPos=<%.9g,%.9g,%.9g> curPosBits=<%08x,%08x,%08x> curDir=<%.9g,%.9g,%.9g> curDirBits=<%08x,%08x,%08x> traceLength=%.9g traceLengthBits=%08x beamLength=%.9g beamLengthBits=%08x rawHitUnit=%d rawHitFeature=%d rawHitPieceModel=%d rawHitPieceScript=%d rawHitPieceName=%s ingress=%u egress=%u inside=%u rawHitPos=<%.9g,%.9g,%.9g> rawHitPosBits=<%08x,%08x,%08x> piecePos=<%.9g,%.9g,%.9g> pieceRot=<%.9g,%.9g,%.9g> pieceScale=%.9g pieceTraPos=<%.9g,%.9g,%.9g> pieceTraRot=<%.9g,%.9g,%.9g,%.9g> pieceTraScale=%.9g",
+				gs->frameNum,
+				owner->id,
+				weaponNum,
+				weaponDef != nullptr ? weaponDef->id : 0u,
+				tries,
+				curPos.x, curPos.y, curPos.z,
+				ReplayCheckpointBeamFloatBits(curPos.x),
+				ReplayCheckpointBeamFloatBits(curPos.y),
+				ReplayCheckpointBeamFloatBits(curPos.z),
+				curDir.x, curDir.y, curDir.z,
+				ReplayCheckpointBeamFloatBits(curDir.x),
+				ReplayCheckpointBeamFloatBits(curDir.y),
+				ReplayCheckpointBeamFloatBits(curDir.z),
+				maxLength - curLength,
+				ReplayCheckpointBeamFloatBits(maxLength - curLength),
+				rawBeamLength,
+				ReplayCheckpointBeamFloatBits(rawBeamLength),
+				rawHitUnit != nullptr ? rawHitUnit->id : -1,
+				rawHitFeature != nullptr ? rawHitFeature->id : -1,
+				rawHitPiece != nullptr ? rawHitPiece->GetLModelPieceIndex() : -1,
+				rawHitPiece != nullptr ? rawHitPiece->GetScriptPieceIndex() : -1,
+				ReplayCheckpointBeamPieceName(rawHitPiece),
+				hitColQuery.IngressHit() ? 1u : 0u,
+				hitColQuery.EgressHit() ? 1u : 0u,
+				hitColQuery.InsideHit() ? 1u : 0u,
+				rawHitPos.x, rawHitPos.y, rawHitPos.z,
+				ReplayCheckpointBeamFloatBits(rawHitPos.x),
+				ReplayCheckpointBeamFloatBits(rawHitPos.y),
+				ReplayCheckpointBeamFloatBits(rawHitPos.z),
+				piecePos.x, piecePos.y, piecePos.z,
+				pieceRot.x, pieceRot.y, pieceRot.z,
+				pieceScale,
+				pieceTraPos.x, pieceTraPos.y, pieceTraPos.z,
+				pieceTraRot.x, pieceTraRot.y, pieceTraRot.z, pieceTraRot.r,
+				pieceTraScale);
+		}
 
 		if (hitUnit != nullptr && teamHandler.AlliedTeams(hitUnit->team, owner->team)) {
 			if (sweepFireState.IsSweepFiring() && !sweepFireState.DamageAllies()) {
@@ -372,6 +500,29 @@ void CBeamLaser::FireInternal(float3 curDir)
 
 		// same as hitColQuery.GetHitPos() if no water or shield in way
 		hitPos = curPos + curDir * beamLength;
+
+		if (debugBeamLaserFrame) {
+			LOG("[ReplayCheckpoint][beamlaser] segment frame=%d owner=%d weapon=%d def=%u try=%d rawBeamLength=%.9g rawBeamLengthBits=%08x finalBeamLength=%.9g finalBeamLengthBits=%08x hitUnit=%d hitFeature=%d hitShield=%d shieldHits=%u hitPos=<%.9g,%.9g,%.9g> hitPosBits=<%08x,%08x,%08x> curLength=%.9g maxLength=%.9g",
+				gs->frameNum,
+				owner->id,
+				weaponNum,
+				weaponDef != nullptr ? weaponDef->id : 0u,
+				tries,
+				rawBeamLength,
+				ReplayCheckpointBeamFloatBits(rawBeamLength),
+				beamLength,
+				ReplayCheckpointBeamFloatBits(beamLength),
+				hitUnit != nullptr ? hitUnit->id : -1,
+				hitFeature != nullptr ? hitFeature->id : -1,
+				hitShield != nullptr ? 1 : 0,
+				static_cast<unsigned int>(hitShields.size()),
+				hitPos.x, hitPos.y, hitPos.z,
+				ReplayCheckpointBeamFloatBits(hitPos.x),
+				ReplayCheckpointBeamFloatBits(hitPos.y),
+				ReplayCheckpointBeamFloatBits(hitPos.z),
+				curLength,
+				maxLength);
+		}
 
 		if (hitShield != nullptr && hitShield->weaponDef->shieldRepulser) {
 			// reflect

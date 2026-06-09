@@ -146,6 +146,7 @@
 #include "fmt/ranges.h"
 
 #include <cstdint>
+#include <cstring>
 #include <exception>
 
 #undef CreateDirectory
@@ -207,6 +208,7 @@ static void LogReplayCheckpointStateSignature(const char* label)
 
 	uint32_t unitHash = 0x13572468u;
 	uint32_t featureHash = 0x24681357u;
+	uint32_t featureUpdateQueueHash = 0x5eed1234u;
 	uint32_t projectileHash = 0xabcdef01u;
 
 	const auto& activeUnits = unitHandler.GetActiveUnits();
@@ -234,6 +236,65 @@ static void LogReplayCheckpointStateSignature(const char* label)
 		featureHash ^= itemHash + 0x9e3779b9u + (featureHash << 6) + (featureHash >> 2);
 	}
 
+	const auto& featureUpdateQueue = featureHandler.GetUpdateFeatures();
+	unsigned int featureQueueMoveCtrlCount = 0;
+	unsigned int featureQueueMovingCount = 0;
+	unsigned int featureQueueDeleteCount = 0;
+	for (const CFeature* feature: featureUpdateQueue) {
+		if (feature == nullptr) {
+			featureUpdateQueueHash = ReplayCheckpointHashInt(featureUpdateQueueHash, -1);
+			continue;
+		}
+
+		featureUpdateQueueHash = ReplayCheckpointHashInt(featureUpdateQueueHash, feature->id);
+		featureUpdateQueueHash = ReplayCheckpointHashUInt(featureUpdateQueueHash, feature->inUpdateQue ? 1u : 0u);
+		featureUpdateQueueHash = ReplayCheckpointHashUInt(featureUpdateQueueHash, feature->deleteMe ? 1u : 0u);
+		featureUpdateQueueHash = ReplayCheckpointHashUInt(featureUpdateQueueHash, feature->moveCtrl.enabled ? 1u : 0u);
+		featureUpdateQueueHash = ReplayCheckpointHashFloat3(featureUpdateQueueHash, feature->pos);
+		featureUpdateQueueHash = ReplayCheckpointHashFloat4(featureUpdateQueueHash, feature->speed);
+		featureUpdateQueueHash = ReplayCheckpointHashFloat3(featureUpdateQueueHash, feature->moveCtrl.velVector);
+		featureUpdateQueueHash = ReplayCheckpointHashFloat3(featureUpdateQueueHash, feature->moveCtrl.accVector);
+		featureUpdateQueueHash = ReplayCheckpointHashInt(featureUpdateQueueHash, feature->smokeTime);
+		featureUpdateQueueHash = ReplayCheckpointHashInt(featureUpdateQueueHash, feature->fireTime);
+
+		featureQueueMoveCtrlCount += feature->moveCtrl.enabled ? 1u : 0u;
+		featureQueueMovingCount += (feature->speed.w != 0.0f) ? 1u : 0u;
+		featureQueueDeleteCount += feature->deleteMe ? 1u : 0u;
+	}
+
+	const bool debugFeatureQueueDetails =
+		(std::strcmp(label, "after-post-load") == 0) ||
+		(std::strcmp(label, "simframe-begin") == 0) ||
+		(std::strcmp(label, "after-projectile-update") == 0);
+	if (debugFeatureQueueDetails) {
+		for (const CFeature* feature: featureUpdateQueue) {
+			if (feature == nullptr) {
+				LOG("[ReplayCheckpoint][feature-detail] %s frame=%d feature=-1 null=1",
+					label,
+					gs->frameNum
+				);
+				continue;
+			}
+
+			LOG("[ReplayCheckpoint][feature-detail] %s frame=%d feature=%d inQueue=%u delete=%u moveCtrl=%u team=%d pos=<%.8g,%.8g,%.8g> speed=<%.8g,%.8g,%.8g,%.8g> vel=<%.8g,%.8g,%.8g> acc=<%.8g,%.8g,%.8g> smoke=%d fire=%d geo=%u",
+				label,
+				gs->frameNum,
+				feature->id,
+				feature->inUpdateQue ? 1u : 0u,
+				feature->deleteMe ? 1u : 0u,
+				feature->moveCtrl.enabled ? 1u : 0u,
+				feature->team,
+				feature->pos.x, feature->pos.y, feature->pos.z,
+				feature->speed.x, feature->speed.y, feature->speed.z, feature->speed.w,
+				feature->moveCtrl.velVector.x, feature->moveCtrl.velVector.y, feature->moveCtrl.velVector.z,
+				feature->moveCtrl.accVector.x, feature->moveCtrl.accVector.y, feature->moveCtrl.accVector.z,
+				feature->smokeTime,
+				feature->fireTime,
+				(feature->def != nullptr && feature->def->geoThermal) ? 1u : 0u
+			);
+		}
+	}
+
 	const auto& syncedProjectiles = projectileHandler.GetActiveProjectiles(true);
 	for (const CProjectile* projectile: syncedProjectiles) {
 		if (projectile == nullptr)
@@ -246,7 +307,7 @@ static void LogReplayCheckpointStateSignature(const char* label)
 		projectileHash = ReplayCheckpointHashFloat4(projectileHash, projectile->speed);
 	}
 
-	LOG("[ReplayCheckpoint][sig] %s frame=%d sync=%08x rng=%llu/%llu/%llu/%llu units=%u unitHash=%08x unitCursor=%u/%u features=%u featureHash=%08x syncedProjectiles=%u projectileHash=%08x",
+	LOG("[ReplayCheckpoint][sig] %s frame=%d sync=%08x rng=%llu/%llu/%llu/%llu units=%u unitHash=%08x unitCursor=%u/%u features=%u featureHash=%08x featureQueue=%u featureQueueHash=%08x featureQueueMoveCtrl=%u featureQueueMoving=%u featureQueueDelete=%u syncedProjectiles=%u projectileHash=%08x",
 		label,
 		gs->frameNum,
 		CSyncChecker::GetChecksum(),
@@ -260,9 +321,17 @@ static void LogReplayCheckpointStateSignature(const char* label)
 		static_cast<unsigned int>(unitHandler.GetActiveUpdateUnit()),
 		static_cast<unsigned int>(featureHandler.GetActiveFeatureIDs().size()),
 		featureHash,
+		static_cast<unsigned int>(featureUpdateQueue.size()),
+		featureUpdateQueueHash,
+		featureQueueMoveCtrlCount,
+		featureQueueMovingCount,
+		featureQueueDeleteCount,
 		static_cast<unsigned int>(syncedProjectiles.size()),
 		projectileHash
 	);
+
+	smoothGround.LogReplayCheckpointStateSignature(label);
+	pathManager->LogReplayCheckpointStateSignature(label);
 }
 
 static void RebuildReplayCheckpointGroundMovePaths()
@@ -2360,19 +2429,19 @@ bool CGame::LoadReplayCheckpoint(const std::string& checkpointPath, int checkpoi
 	const bool wasSyncedPaused = (gs != nullptr && gs->paused);
 	const bool wasServerPaused = (gameServer != nullptr && gameServer->IsPaused());
 
-		try {
-			CCregLoadSaveHandler loadSaveHandler;
-			const auto dumpReplayCheckpointDebugState = [&](const char* label) {
-				const int debugDumpFrame = configHandler->GetInt("ReplayCheckpointDebugDumpFrame");
-				if (debugDumpFrame < 0 || gs == nullptr || gs->frameNum != debugDumpFrame)
-					return;
+	try {
+		CCregLoadSaveHandler loadSaveHandler;
+		const auto dumpReplayCheckpointDebugState = [&](const char* label) {
+			const int debugDumpFrame = configHandler->GetInt("ReplayCheckpointDebugDumpFrame");
+			if (debugDumpFrame < 0 || gs == nullptr || gs->frameNum != debugDumpFrame)
+				return;
 
-				LOG("[ReplayCheckpoint] debug dump %s at frame %d", label, gs->frameNum);
-				DumpState(gs->frameNum, gs->frameNum, 1, false, std::nullopt, true);
-			};
+			LOG("[ReplayCheckpoint] debug dump %s at frame %d", label, gs->frameNum);
+			DumpState(gs->frameNum, gs->frameNum, 1, false, std::nullopt, true);
+		};
 
-			if (!loadSaveHandler.LoadGameStartInfo(checkpointPath)) {
-				LOG_L(L_WARNING,
+		if (!loadSaveHandler.LoadGameStartInfo(checkpointPath)) {
+			LOG_L(L_WARNING,
 				"[ReplayCheckpoint] checkpoint frame %d is incompatible with this engine build: %s",
 				checkpointFrame,
 				checkpointPath.c_str()
@@ -2380,30 +2449,49 @@ bool CGame::LoadReplayCheckpoint(const std::string& checkpointPath, int checkpoi
 			return false;
 		}
 
-			{
-				auto lock = CLoadLock::GetUniqueLock();
-				loadSaveHandler.LoadGame();
-			}
-			losHandler->ResetLiveMapsForLoad();
-			dumpReplayCheckpointDebugState("after-creg-load");
+		{
+			struct ReplayCheckpointSmoothGroundMapChangeSuppressor {
+				ReplayCheckpointSmoothGroundMapChangeSuppressor()
+				{
+					smoothGround.SetReplayCheckpointMapChangedSuppressedForLoad(true);
+				}
 
-			quadField.RebuildForLoad();
-			LOG("[ReplayCheckpoint] rebuilt quadfield occupancy after load");
-			dumpReplayCheckpointDebugState("after-quadfield-rebuild");
+				~ReplayCheckpointSmoothGroundMapChangeSuppressor()
+				{
+					smoothGround.SetReplayCheckpointMapChangedSuppressedForLoad(false);
+				}
+			} suppressSmoothGroundMapChanges;
 
-			CBuilderCaches::InitStatic();
+			auto lock = CLoadLock::GetUniqueLock();
+			loadSaveHandler.LoadGame();
+		}
+		losHandler->ResetLiveMapsForLoad();
+		featureHandler.RestoreUpdateQueueForLoad();
+		dumpReplayCheckpointDebugState("after-creg-load");
 
-			pathManager->ResetLivePathsForLoad();
+		quadField.RestoreSerializedStateForLoad();
+		LOG("[ReplayCheckpoint] restored serialized quadfield occupancy after load");
+		dumpReplayCheckpointDebugState("after-quadfield-restore");
+
+		CBuilderCaches::InitStatic();
+
+		pathManager->ResetLivePathsForLoad();
+		readMap->UpdateHeightBounds();
+		pathManager->RebuildReplayCheckpointNodeLayersForLoad();
+		if (pathManager->RestoreReplayCheckpointPathsForLoad()) {
+			LOG("[ReplayCheckpoint] restored QTPFS path state after load");
+		} else {
 			RebuildReplayCheckpointGroundMovePaths();
 			for (int update = 0; update < 3; ++update)
 				pathManager->Update();
 			pathManager->RestoreReplayCheckpointPathAllocator();
 			LOG("[ReplayCheckpoint] processed rebuilt QTPFS path searches after load");
-			dumpReplayCheckpointDebugState("after-path-reset");
+		}
+		dumpReplayCheckpointDebugState("after-path-reset");
 
-			if (gameSetup != nullptr && gameSetup->hostDemo) {
-				const int restoredPlayerNum = gu->myPlayerNum;
-				localViewerState.Restore();
+		if (gameSetup != nullptr && gameSetup->hostDemo) {
+			const int restoredPlayerNum = gu->myPlayerNum;
+			localViewerState.Restore();
 
 			if (restoredPlayerNum != gu->myPlayerNum) {
 				LOG("[ReplayCheckpoint] restored local replay viewer player from checkpoint player %d to player %d",
@@ -2411,28 +2499,29 @@ bool CGame::LoadReplayCheckpoint(const std::string& checkpointPath, int checkpoi
 					gu->myPlayerNum
 				);
 			}
-			}
+		}
 
-			LoadLua(false, true);
-			dumpReplayCheckpointDebugState("after-lua-reload");
+		LoadLua(false, true);
+		dumpReplayCheckpointDebugState("after-lua-reload");
 
-			if (gameSetup == nullptr || !gameSetup->hostDemo)
-				loadSaveHandler.LoadAIData();
-			dumpReplayCheckpointDebugState("after-ai-load");
+		if (gameSetup == nullptr || !gameSetup->hostDemo)
+			loadSaveHandler.LoadAIData();
+		dumpReplayCheckpointDebugState("after-ai-load");
 
-			if (!gameSetup->hostDemo && !uiGroupHandlers.empty()) {
-				const std::vector<uint8_t>& localAIs = skirmishAIHandler.GetSkirmishAIsByPlayer(gu->myPlayerNum);
+		if (!gameSetup->hostDemo && !uiGroupHandlers.empty()) {
+			const std::vector<uint8_t>& localAIs = skirmishAIHandler.GetSkirmishAIsByPlayer(gu->myPlayerNum);
 
 			for (uint8_t localAI: localAIs)
 				skirmishAIHandler.PostLoadSkirmishAI(localAI);
-			}
+		}
 
-			PostLoad();
-			LogReplayCheckpointStateSignature("after-post-load");
-			dumpReplayCheckpointDebugState("after-post-load");
+		PostLoad();
+		pathManager->RestoreReplayCheckpointPathAllocator();
+		LogReplayCheckpointStateSignature("after-post-load");
+		dumpReplayCheckpointDebugState("after-post-load");
 
-			if (gameServer != nullptr && gameServer->GetDemoReader() != nullptr)
-				gameServer->ResetDemoPlaybackToFrame((gs != nullptr) ? gs->frameNum : checkpointFrame);
+		if (gameServer != nullptr && gameServer->GetDemoReader() != nullptr)
+			gameServer->ResetDemoPlaybackToFrame((gs != nullptr) ? gs->frameNum : checkpointFrame);
 
 		if (clientNet != nullptr) {
 			const unsigned int droppedPackets = clientNet->ClearWaitingServerPackets();
@@ -2461,10 +2550,24 @@ bool CGame::LoadReplayCheckpoint(const std::string& checkpointPath, int checkpoi
 
 #ifdef SYNCCHECK
 		CSyncChecker::SetChecksum(syncCheckChecksum);
-		ResetLocalSyncChecksumsForReplayCheckpoint(checkpointFrame, syncCheckChecksum);
-		LOG("[ReplayCheckpoint] restored sync-check checksum %08x for checkpoint frame %d",
-			syncCheckChecksum,
-			checkpointFrame
+		const bool enteredSyncedCode = !CSyncChecker::InSyncedCode();
+		if (enteredSyncedCode)
+			ENTER_SYNCED_CODE();
+
+		// Checkpoints are saved before NetCommands applies the frame's final SYNCCHECK writes.
+		// Reapply that boundary so the next resumed frame starts from the same accumulator state.
+		ASSERT_SYNCED(gs->frameNum);
+		ASSERT_SYNCED(CSyncChecker::GetChecksum());
+
+		const unsigned int resumedSyncCheckChecksum = CSyncChecker::GetChecksum();
+		if (enteredSyncedCode)
+			LEAVE_SYNCED_CODE();
+
+		ResetLocalSyncChecksumsForReplayCheckpoint(checkpointFrame, resumedSyncCheckChecksum);
+		LOG("[ReplayCheckpoint] restored sync-check checksum %08x for checkpoint frame %d (captured %08x)",
+			resumedSyncCheckChecksum,
+			checkpointFrame,
+			syncCheckChecksum
 		);
 #endif
 
