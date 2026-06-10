@@ -20,6 +20,7 @@
 
 #include "PathDefines.h"
 #include "PathManager.h"
+#include "PathSearchReplayCheckpointState.h"
 
 #include "Utils/PathSpeedModInfoSystemUtils.h"
 
@@ -562,6 +563,23 @@ QTPFS::PathManager::~PathManager() {
 		}
 	});
 
+	std::vector<QTPFS::entity> emptyEntities;
+	registry.each([this, &emptyEntities](auto entity) {
+		if (entity == systemEntity)
+			return;
+		if (HasReplayCheckpointKnownComponent(entity, systemEntity))
+			return;
+
+		emptyEntities.push_back(entity);
+	});
+	for (const QTPFS::entity entity: emptyEntities) {
+		if (registry.valid(entity))
+			registry.destroy(entity);
+	}
+	if (!emptyEntities.empty()) {
+		LOG("%s: cleared %u empty registry entities", __func__, static_cast<unsigned int>(emptyEntities.size()));
+	}
+
 	nodeLayerUpdatePriorityOrder.clear();
 	for (unsigned int layerNum = 0; layerNum < nodeLayers.size(); layerNum++) {
 		auto& nodeLayer = nodeLayers[layerNum];
@@ -680,6 +698,35 @@ void QTPFS::PathManager::RebuildReplayCheckpointNodeLayersForLoad()
 
 	InitRootSize(MAP_RECTANGLE);
 
+	if (replayCheckpointNodeLayersLoaded) {
+		nodeLayerUpdatePriorityOrder.resize(numMoveDefs);
+		for (int i = 0; i < numMoveDefs; ++i) {
+			nodeLayerUpdatePriorityOrder[i] = i;
+		}
+		std::stable_sort(nodeLayerUpdatePriorityOrder.begin(), nodeLayerUpdatePriorityOrder.end(), [](int a, int b){
+			return (moveDefHandler.GetMoveDefByPathType(a)->xsize > moveDefHandler.GetMoveDefByPathType(b)->xsize);
+		});
+
+		PathSpeedModInfoSystem::Init();
+
+		pfsCheckSum = 0;
+		int maxAllocedNodes = 0;
+		for (const NodeLayer& nodeLayer: nodeLayers) {
+			for (int i = 0; i < nodeLayer.GetRootNodeCount(); ++i) {
+				const INode* curRootNode = nodeLayer.GetPoolNode(i);
+				pfsCheckSum ^= curRootNode->GetCheckSum(nodeLayer);
+			}
+			maxAllocedNodes = std::max(nodeLayer.GetMaxNodesAlloced(), maxAllocedNodes);
+		}
+
+		LOG("[ReplayCheckpoint] restored QTPFS node layers for load: %u layers, maxAlloc=%d, pfs-checksum=%08x",
+			static_cast<unsigned int>(nodeLayers.size()),
+			maxAllocedNodes,
+			pfsCheckSum
+		);
+		return;
+	}
+
 	nodeLayerUpdatePriorityOrder.resize(numMoveDefs);
 	for (int i = 0; i < numMoveDefs; ++i) {
 		nodeLayerUpdatePriorityOrder[i] = i;
@@ -731,26 +778,10 @@ void QTPFS::PathManager::CaptureReplayCheckpointPathStates()
 
 		ReplayCheckpointPathState state;
 		state.entity = entity;
-		state.hasOwner = (path->GetOwner() != nullptr);
-		state.ownerID = state.hasOwner ? static_cast<uint32_t>(path->GetOwner()->id) : 0u;
-		state.pathID = path->GetID();
-		state.nextPointIndex = path->GetNextPointIndex();
-		state.repathTriggerIndex = path->GetRepathTriggerIndex();
-		state.numPathUpdates = path->GetNumPathUpdates();
-		state.firstCleanNodeID = path->GetFirstNodeIdOfCleanPath();
-		state.hash = path->GetHash();
-		state.virtualHash = path->GetVirtualHash();
-		state.radius = path->GetRadius();
-		state.boundingBoxMins = path->GetBoundingBoxMins();
-		state.boundingBoxMaxs = path->GetBoundingBoxMaxs();
-		state.goalPosition = path->GetGoalPosition();
-		state.searchTime = path->GetSearchTime();
-		state.pathType = path->GetPathType();
-		state.synced = path->IsSynced();
-		state.fullPath = path->IsFullPath();
-		state.partialPath = path->IsPartialPath();
-		state.rawPath = path->IsRawPath();
-		state.boundingBoxOverride = path->IsBoundingBoxOverriden();
+		state.path = CaptureReplayCheckpointPathPayload(
+			*path,
+			(path->GetOwner() != nullptr) ? static_cast<uint32_t>(path->GetOwner()->id) : 0u
+		);
 		state.unsyncedPath = registry.any_of<UnsyncedIPath>(entity);
 		state.externalPath = registry.any_of<ExternallyManagedSyncedIPath>(entity);
 		state.dirty = registry.any_of<PathIsDirty>(entity);
@@ -779,26 +810,13 @@ void QTPFS::PathManager::CaptureReplayCheckpointPathStates()
 			state.partialSharedPathHead = (partialIt != partialSharedPaths.end() && partialIt->second == entity);
 		}
 
-		state.points.reserve(path->NumPoints());
-		for (unsigned int i = 0; i < path->NumPoints(); ++i) {
-			state.points.push_back(path->GetPoint(i));
-		}
-
-		const unsigned int nodeCount = path->NumNodes();
-		state.nodes.reserve(nodeCount);
-		for (unsigned int i = 0; i < nodeCount; ++i) {
-			const IPath::PathNodeData& node = path->GetNode(i);
-			state.nodes.push_back({
-				node.nodeId,
-				node.nodeNumber,
-				node.netPoint,
-				node.pathPointIndex,
-				node.xmin,
-				node.zmin,
-				node.xmax,
-				node.zmax,
-				node.badNode
-			});
+		const SearchModeIPath* searchModePath = registry.try_get<SearchModeIPath>(entity);
+		state.hasSearchModeSnapshot = (searchModePath != nullptr);
+		if (state.hasSearchModeSnapshot) {
+			state.searchModeSnapshot = CaptureReplayCheckpointPathPayload(
+				*searchModePath,
+				(searchModePath->GetOwner() != nullptr) ? static_cast<uint32_t>(searchModePath->GetOwner()->id) : 0u
+			);
 		}
 
 		replayCheckpointPathStates.push_back(std::move(state));
@@ -820,6 +838,39 @@ void QTPFS::PathManager::CaptureReplayCheckpointPathStates()
 	}
 }
 
+void QTPFS::PathManager::CaptureReplayCheckpointPathSearchStates()
+{
+	replayCheckpointPathSearchStates.clear();
+
+	auto captureSearchState = [this](auto entity, uint8_t componentKind) {
+		const PathSearch* search = GetSearch(entity);
+		if (search == nullptr)
+			return;
+
+		replayCheckpointPathSearchStates.push_back(CaptureReplayCheckpointPathSearchState(
+			entity,
+			*search,
+			componentKind,
+			registry.any_of<ProcessPath>(entity)
+		));
+	};
+
+	auto pathSearchView = registry.view<PathSearch>();
+	for (auto entity: pathSearchView) {
+		captureSearchState(entity, REPLAY_CHECKPOINT_SEARCH_PATH);
+	}
+
+	auto unsyncedSearchView = registry.view<UnsyncedPathSearch>();
+	for (auto entity: unsyncedSearchView) {
+		captureSearchState(entity, REPLAY_CHECKPOINT_SEARCH_UNSYNCED);
+	}
+
+	auto externalSearchView = registry.view<ExternallyManagedPathSearch>();
+	for (auto entity: externalSearchView) {
+		captureSearchState(entity, REPLAY_CHECKPOINT_SEARCH_EXTERNAL);
+	}
+}
+
 void QTPFS::PathManager::CaptureReplayCheckpointEmptyEntities()
 {
 	replayCheckpointEmptyEntities.clear();
@@ -834,10 +885,9 @@ void QTPFS::PathManager::CaptureReplayCheckpointEmptyEntities()
 	});
 }
 
-void QTPFS::PathManager::SerializeReplayCheckpointPathState(creg::ISerializer* s, ReplayCheckpointPathState& state)
+static void SerializeReplayCheckpointPathPayloadHeader(creg::ISerializer* s, QTPFS::ReplayCheckpointPathPayload& state)
 {
-	s->Serialize(state.entity);
-	SerializeBoolByte(s, state.hasOwner);
+	QTPFS::SerializeBoolByte(s, state.hasOwner);
 	s->Serialize(state.ownerID);
 	s->Serialize(state.pathID);
 	s->Serialize(state.nextPointIndex);
@@ -847,16 +897,55 @@ void QTPFS::PathManager::SerializeReplayCheckpointPathState(creg::ISerializer* s
 	s->Serialize(state.hash);
 	s->Serialize(state.virtualHash);
 	s->Serialize(state.radius);
-	SerializeFloat3Value(s, state.boundingBoxMins);
-	SerializeFloat3Value(s, state.boundingBoxMaxs);
-	SerializeFloat3Value(s, state.goalPosition);
-	SerializeSpringTimeValue(s, state.searchTime);
+	QTPFS::SerializeFloat3Value(s, state.boundingBoxMins);
+	QTPFS::SerializeFloat3Value(s, state.boundingBoxMaxs);
+	QTPFS::SerializeFloat3Value(s, state.goalPosition);
+	QTPFS::SerializeSpringTimeValue(s, state.searchTime);
 	s->Serialize(state.pathType);
-	SerializeBoolByte(s, state.synced);
-	SerializeBoolByte(s, state.fullPath);
-	SerializeBoolByte(s, state.partialPath);
-	SerializeBoolByte(s, state.rawPath);
-	SerializeBoolByte(s, state.boundingBoxOverride);
+	QTPFS::SerializeBoolByte(s, state.synced);
+	QTPFS::SerializeBoolByte(s, state.fullPath);
+	QTPFS::SerializeBoolByte(s, state.partialPath);
+	QTPFS::SerializeBoolByte(s, state.rawPath);
+	QTPFS::SerializeBoolByte(s, state.boundingBoxOverride);
+}
+
+static void SerializeReplayCheckpointPathPayloadGeometry(creg::ISerializer* s, QTPFS::ReplayCheckpointPathPayload& state)
+{
+	uint32_t pointCount = static_cast<uint32_t>(state.points.size());
+	s->Serialize(pointCount);
+	if (!s->IsWriting())
+		state.points.resize(pointCount);
+	for (float3& point: state.points) {
+		QTPFS::SerializeFloat3Value(s, point);
+	}
+
+	uint32_t nodeCount = static_cast<uint32_t>(state.nodes.size());
+	s->Serialize(nodeCount);
+	if (!s->IsWriting())
+		state.nodes.resize(nodeCount);
+	for (QTPFS::ReplayCheckpointPathNodeState& node: state.nodes) {
+		s->Serialize(node.nodeId);
+		s->Serialize(node.nodeNumber);
+		s->Serialize(&node.netPoint, sizeof(node.netPoint));
+		s->Serialize(node.pathPointIndex);
+		s->Serialize(node.xmin);
+		s->Serialize(node.zmin);
+		s->Serialize(node.xmax);
+		s->Serialize(node.zmax);
+		QTPFS::SerializeBoolByte(s, node.badNode);
+	}
+}
+
+void QTPFS::PathManager::SerializeReplayCheckpointPathPayload(creg::ISerializer* s, ReplayCheckpointPathPayload& state)
+{
+	SerializeReplayCheckpointPathPayloadHeader(s, state);
+	SerializeReplayCheckpointPathPayloadGeometry(s, state);
+}
+
+void QTPFS::PathManager::SerializeReplayCheckpointPathState(creg::ISerializer* s, ReplayCheckpointPathState& state)
+{
+	s->Serialize(state.entity);
+	SerializeReplayCheckpointPathPayloadHeader(s, state.path);
 	SerializeBoolByte(s, state.unsyncedPath);
 	SerializeBoolByte(s, state.externalPath);
 	SerializeBoolByte(s, state.dirty);
@@ -876,30 +965,39 @@ void QTPFS::PathManager::SerializeReplayCheckpointPathState(creg::ISerializer* s
 	SerializeBoolByte(s, state.partialSharedPathHead);
 	s->Serialize(state.partialSharedPrev);
 	s->Serialize(state.partialSharedNext);
+	SerializeReplayCheckpointPathPayloadGeometry(s, state.path);
 
-	uint32_t pointCount = static_cast<uint32_t>(state.points.size());
-	s->Serialize(pointCount);
-	if (!s->IsWriting())
-		state.points.resize(pointCount);
-	for (float3& point: state.points) {
-		SerializeFloat3Value(s, point);
-	}
+	SerializeBoolByte(s, state.hasSearchModeSnapshot);
+	if (state.hasSearchModeSnapshot)
+		SerializeReplayCheckpointPathPayload(s, state.searchModeSnapshot);
+}
 
-	uint32_t nodeCount = static_cast<uint32_t>(state.nodes.size());
-	s->Serialize(nodeCount);
-	if (!s->IsWriting())
-		state.nodes.resize(nodeCount);
-	for (ReplayCheckpointPathNodeState& node: state.nodes) {
-		s->Serialize(node.nodeId);
-		s->Serialize(node.nodeNumber);
-		s->Serialize(&node.netPoint, sizeof(node.netPoint));
-		s->Serialize(node.pathPointIndex);
-		s->Serialize(node.xmin);
-		s->Serialize(node.zmin);
-		s->Serialize(node.xmax);
-		s->Serialize(node.zmax);
-		SerializeBoolByte(s, node.badNode);
-	}
+void QTPFS::PathManager::SerializeReplayCheckpointPathSearchState(creg::ISerializer* s, ReplayCheckpointPathSearchState& state)
+{
+	s->Serialize(state.entity);
+	s->Serialize(state.pathEntity);
+	s->Serialize(state.searchType);
+	s->Serialize(state.searchTeam);
+	s->Serialize(state.componentKind);
+	s->Serialize(state.pathType);
+	SerializeBoolByte(s, state.processPath);
+	SerializeBoolByte(s, state.rawPathCheck);
+	SerializeBoolByte(s, state.synced);
+	SerializeBoolByte(s, state.pathRequestWaiting);
+	SerializeBoolByte(s, state.doPartialSearch);
+	SerializeBoolByte(s, state.tryPathRepair);
+	SerializeBoolByte(s, state.rejectPartialSearch);
+	SerializeBoolByte(s, state.allowPartialSearch);
+	SerializeBoolByte(s, state.expectIncompletePartialSearch);
+	SerializeBoolByte(s, state.searchEarlyDrop);
+	SerializeBoolByte(s, state.initialized);
+	SerializeBoolByte(s, state.partialReverseTrace);
+	SerializeBoolByte(s, state.doPathRepair);
+	SerializeBoolByte(s, state.fwdPathConnected);
+	SerializeBoolByte(s, state.bwdPathConnected);
+	SerializeBoolByte(s, state.useFwdPathOnly);
+	SerializeBoolByte(s, state.haveFullPath);
+	SerializeBoolByte(s, state.havePartPath);
 }
 
 void QTPFS::PathManager::PruneReplayCheckpointExtraEmptyEntities()
@@ -982,11 +1080,60 @@ void QTPFS::PathManager::RestoreReplayCheckpointPathComponentOrder()
 	registry.sort<PathIsDirty>(comparePathEntity);
 	registry.sort<PathIsToBeUpdated>(comparePathEntity);
 	registry.sort<PathUpdatedCounterIncrease>(comparePathEntity);
+	registry.sort<PathSearchRef>(comparePathEntity);
 	registry.sort<PathRequeueSearch>(comparePathEntity);
 	registry.sort<SearchModeIPath>(comparePathEntity);
 	registry.sort<PathDelayedDelete>(comparePathEntity);
 	registry.sort<SharedPathChain>(comparePathEntity);
 	registry.sort<PartialSharedPathChain>(comparePathEntity);
+	registry.sort<PathSearch>(LessReplayCheckpointPathSearchEntity);
+	registry.sort<UnsyncedPathSearch>(LessReplayCheckpointPathSearchEntity);
+	registry.sort<ExternallyManagedPathSearch>(LessReplayCheckpointPathSearchEntity);
+	registry.sort<ProcessPath>(LessReplayCheckpointPathSearchEntity);
+}
+
+void QTPFS::PathManager::RestoreReplayCheckpointPathSearchesForLoad()
+{
+	unsigned int restoredSearches = 0;
+	unsigned int restoredProcessSearches = 0;
+
+	for (const ReplayCheckpointPathSearchState& state: replayCheckpointPathSearchStates) {
+		if (!registry.valid(state.pathEntity))
+			continue;
+
+		IPath* path = GetPath(state.pathEntity);
+		if (path == nullptr)
+			continue;
+
+		if (!registry.valid(state.entity))
+			[[maybe_unused]] const QTPFS::entity createdEntity = registry.create(state.entity);
+
+		PathSearch* search = nullptr;
+		if (state.componentKind == REPLAY_CHECKPOINT_SEARCH_UNSYNCED) {
+			search = &registry.emplace_or_replace<UnsyncedPathSearch>(state.entity, state.searchType);
+		} else if (state.componentKind == REPLAY_CHECKPOINT_SEARCH_EXTERNAL) {
+			search = &registry.emplace_or_replace<ExternallyManagedPathSearch>(state.entity, state.searchType);
+		} else {
+			search = &registry.emplace_or_replace<PathSearch>(state.entity, state.searchType);
+		}
+
+		ApplyReplayCheckpointPathSearchState(state, *search, path->GetRadius());
+
+		registry.emplace_or_replace<PathSearchRef>(state.pathEntity, state.entity);
+		if (state.processPath) {
+			registry.emplace_or_replace<ProcessPath>(state.entity);
+			++restoredProcessSearches;
+		}
+
+		++restoredSearches;
+	}
+
+	if (restoredSearches > 0) {
+		LOG("[ReplayCheckpoint] restored QTPFS path searches for load: %u searches, %u ready",
+			restoredSearches,
+			restoredProcessSearches
+		);
+	}
 }
 
 bool QTPFS::PathManager::RestoreReplayCheckpointPathsForLoad()
@@ -1015,35 +1162,8 @@ bool QTPFS::PathManager::RestoreReplayCheckpointPathsForLoad()
 			path = &registry.emplace_or_replace<IPath>(state.entity);
 		}
 
-		CSolidObject* owner = state.hasOwner ? GetReplayCheckpointPathOwner(state.ownerID) : nullptr;
-
-		path->SetID(state.pathID);
-		path->SetPathType(state.pathType);
-		path->SetNextPointIndex(state.nextPointIndex);
-		path->SetRepathTriggerIndex(state.repathTriggerIndex);
-		path->SetNumPathUpdates(state.numPathUpdates);
-		path->SetFirstNodeIdOfCleanPath(state.firstCleanNodeID);
-		path->SetHash(state.hash);
-		path->SetVirtualHash(state.virtualHash);
-		path->SetRadius(state.radius);
-		path->SetSynced(state.synced);
-		path->SetHasFullPath(state.fullPath);
-		path->SetHasPartialPath(state.partialPath);
-		path->SetIsRawPath(state.rawPath);
-		path->AllocPoints(state.points.size());
-		for (unsigned int i = 0; i < state.points.size(); ++i) {
-			path->SetPoint(i, state.points[i]);
-		}
-		path->AllocNodes(state.nodes.size());
-		for (unsigned int i = 0; i < state.nodes.size(); ++i) {
-			const ReplayCheckpointPathNodeState& node = state.nodes[i];
-			path->SetNode(i, node.nodeId, node.nodeNumber, float2{node.netPoint.x, node.netPoint.y}, node.pathPointIndex, node.badNode);
-			path->SetNodeBoundary(i, node.xmin, node.zmin, node.xmax, node.zmax);
-		}
-		path->SetOwner(owner);
-		path->SetGoalPosition(state.goalPosition);
-		path->SetSearchTime(state.searchTime);
-		path->RestoreBoundingBoxState(state.boundingBoxMins, state.boundingBoxMaxs, state.boundingBoxOverride);
+		CSolidObject* owner = state.path.hasOwner ? GetReplayCheckpointPathOwner(state.path.ownerID) : nullptr;
+		ApplyReplayCheckpointPathPayload(state.path, *path, owner);
 
 		if (state.dirty) {
 			registry.emplace_or_replace<PathIsDirty>(state.entity);
@@ -1063,7 +1183,12 @@ bool QTPFS::PathManager::RestoreReplayCheckpointPathsForLoad()
 		}
 		if (state.searchModePath) {
 			SearchModeIPath& searchPath = registry.emplace_or_replace<SearchModeIPath>(state.entity);
-			static_cast<IPath&>(searchPath) = *path;
+			if (state.hasSearchModeSnapshot) {
+				CSolidObject* searchModeOwner = state.searchModeSnapshot.hasOwner ? GetReplayCheckpointPathOwner(state.searchModeSnapshot.ownerID) : nullptr;
+				ApplyReplayCheckpointPathPayload(state.searchModeSnapshot, searchPath, searchModeOwner);
+			} else {
+				static_cast<IPath&>(searchPath) = *path;
+			}
 		}
 		if (state.delayedDelete)
 			registry.emplace_or_replace<PathDelayedDelete>(state.entity, state.delayedDeleteFrame);
@@ -1073,6 +1198,7 @@ bool QTPFS::PathManager::RestoreReplayCheckpointPathsForLoad()
 	}
 
 	RestoreReplayCheckpointSharedPathCaches();
+	RestoreReplayCheckpointPathSearchesForLoad();
 	RestoreReplayCheckpointPathComponentOrder();
 	PruneReplayCheckpointExtraEmptyEntities();
 	RestoreReplayCheckpointPathAllocator();
@@ -1095,6 +1221,7 @@ void QTPFS::PathManager::SerializeReplayCheckpointState(creg::ISerializer* s)
 		replayCheckpointRegistryEntities.assign(registry.data(), registry.data() + registry.size());
 		replayCheckpointRegistryReleased = registry.released();
 		CaptureReplayCheckpointPathStates();
+		CaptureReplayCheckpointPathSearchStates();
 		CaptureReplayCheckpointEmptyEntities();
 	}
 
@@ -1113,6 +1240,22 @@ void QTPFS::PathManager::SerializeReplayCheckpointState(creg::ISerializer* s)
 		SerializeReplayCheckpointPathState(s, pathState);
 	}
 
+	uint32_t pathSearchStateCount = static_cast<uint32_t>(replayCheckpointPathSearchStates.size());
+	s->Serialize(pathSearchStateCount);
+	if (!s->IsWriting())
+		replayCheckpointPathSearchStates.resize(pathSearchStateCount);
+	for (ReplayCheckpointPathSearchState& pathSearchState: replayCheckpointPathSearchStates) {
+		SerializeReplayCheckpointPathSearchState(s, pathSearchState);
+	}
+
+	uint32_t nodeLayerCount = static_cast<uint32_t>(nodeLayers.size());
+	s->Serialize(nodeLayerCount);
+	if (!s->IsWriting())
+		nodeLayers.resize(nodeLayerCount);
+	for (NodeLayer& nodeLayer: nodeLayers) {
+		nodeLayer.SerializeReplayCheckpoint(s);
+	}
+
 	SerializeReplayCheckpointNodeLayersChangeTrack(s, nodeLayersMapDamageTrack);
 	SerializeReplayCheckpointPathCache(s, pathCache);
 	s->Serialize(refreshDirtyPathRateFrame);
@@ -1122,6 +1265,7 @@ void QTPFS::PathManager::SerializeReplayCheckpointState(creg::ISerializer* s)
 	if (!s->IsWriting()) {
 		replayCheckpointRegistryLoaded = true;
 		replayCheckpointPathStatesLoaded = !replayCheckpointPathStates.empty();
+		replayCheckpointNodeLayersLoaded = !nodeLayers.empty();
 	}
 #endif
 }
@@ -1216,6 +1360,83 @@ static uint32_t ReplayCheckpointPathHashUInt64(uint32_t hash, uint64_t value)
 	return spring::LiteHash(&value, sizeof(value), hash);
 }
 
+static uint32_t ReplayCheckpointPathHashNodeSpeedBinCache(
+	uint32_t hash,
+	const QTPFS::NodeLayer::NodeSpeedBinCache& cache
+)
+{
+	for (const QTPFS::NodeLayer::MapSquareData& square: cache) {
+		hash = ReplayCheckpointPathHashUInt(hash, static_cast<uint32_t>(square.bin));
+	}
+
+	return hash;
+}
+
+static uint32_t ReplayCheckpointPathHashNodeLayerStatusCache(
+	uint32_t hash,
+	const QTPFS::NodeLayer& nodeLayer
+)
+{
+	const uint32_t sectorStride = QTPFS::NodeLayer::NODE_CACHE_SECTOR_STRIDE;
+	const uint32_t sectorsX = mapDims.mapx / sectorStride;
+	const uint32_t sectorsZ = mapDims.mapy / sectorStride;
+
+	for (uint32_t sectorZ = 0; sectorZ < sectorsZ; ++sectorZ) {
+		for (uint32_t sectorX = 0; sectorX < sectorsX; ++sectorX) {
+			const QTPFS::NodeLayer::NodeSpeedBinCache& cache =
+				nodeLayer.GetNodeSpeedBinCache(sectorX * sectorStride, sectorZ * sectorStride);
+			hash = ReplayCheckpointPathHashUInt(hash, sectorX);
+			hash = ReplayCheckpointPathHashUInt(hash, sectorZ);
+			hash = ReplayCheckpointPathHashNodeSpeedBinCache(hash, cache);
+		}
+	}
+
+	return hash;
+}
+
+static unsigned int ReplayCheckpointCountNodeSpeedBinCacheChanges(
+	const QTPFS::NodeLayer::NodeSpeedBinCache& before,
+	const QTPFS::NodeLayer::NodeSpeedBinCache& after,
+	uint32_t& firstChangeIndex,
+	uint32_t& firstBefore,
+	uint32_t& firstAfter
+)
+{
+	unsigned int changeCount = 0;
+	firstChangeIndex = std::numeric_limits<uint32_t>::max();
+	firstBefore = 0u;
+	firstAfter = 0u;
+
+	for (uint32_t index = 0; index < before.size(); ++index) {
+		if (before[index] == after[index])
+			continue;
+
+		if (firstChangeIndex == std::numeric_limits<uint32_t>::max()) {
+			firstChangeIndex = index;
+			firstBefore = before[index].bin;
+			firstAfter = after[index].bin;
+		}
+
+		++changeCount;
+	}
+
+	return changeCount;
+}
+
+static bool ReplayCheckpointDebugQTPFSStatusCacheSector(unsigned int layerNum, const SRectangle& rect)
+{
+	if (!QTPFS::ReplayCheckpointDebugQTPFSLifecycleFrame())
+		return false;
+
+	return (
+		layerNum == 32u &&
+		rect.x1 == 224 &&
+		rect.z1 == 208 &&
+		rect.x2 == 240 &&
+		rect.z2 == 224
+	);
+}
+
 struct ReplayCheckpointRegistrySignature {
 	uint32_t entityTableHash = 0x2f4d12a1u;
 	uint32_t freeListHash = 0x72e43c19u;
@@ -1254,6 +1475,61 @@ static ReplayCheckpointRegistrySignature GetReplayCheckpointRegistrySignature()
 	return signature;
 }
 
+static void LogReplayCheckpointDirtyPathEvent(
+	const char* label,
+	const QTPFS::entity pathEntity,
+	const std::int32_t refreshDirtyPathRateFrame,
+	const std::int32_t updateDirtyPathRate,
+	const std::int32_t updateDirtyPathRemainder,
+	const unsigned int slot = 0u,
+	const QTPFS::PathCache::DirtyPathDetail* dirtyPathDetail = nullptr,
+	const bool alreadyDirty = false,
+	const bool markedDirty = false
+)
+{
+	if (!QTPFS::ReplayCheckpointDebugQTPFSLifecycleFrame())
+		return;
+
+	const QTPFS::IPath* path = QTPFS::GetPath(pathEntity);
+	const int ownerID = (path != nullptr && path->GetOwner() != nullptr) ? path->GetOwner()->id : 0;
+
+	LOG("[ReplayCheckpoint][qtpfs-dirty] %s frame=%d slot=%u path=%u owner=%d type=%d points=%u nodes=%u next=%u firstClean=%u raw=%u dirty=%u update=%u updatedCounter=%u requeue=%u searchRef=%u alreadyDirty=%u markedDirty=%u clearPath=%u clearSharing=%u auto=%d cleanFrom=%d refresh=%d dirtyRate=%d dirtyRemainder=%d hash=%08x virtual=%08x source=<%.8g,%.8g,%.8g> target=<%.8g,%.8g,%.8g>",
+		label,
+		gs->frameNum,
+		slot,
+		static_cast<unsigned int>(entt::to_integral(pathEntity)),
+		ownerID,
+		(path != nullptr) ? path->GetPathType() : 0,
+		(path != nullptr) ? path->NumPoints() : 0u,
+		(path != nullptr) ? path->NumNodes() : 0u,
+		(path != nullptr) ? path->GetNextPointIndex() : 0u,
+		(path != nullptr) ? path->GetFirstNodeIdOfCleanPath() : 0u,
+		(path != nullptr && path->IsRawPath()) ? 1u : 0u,
+		QTPFS::registry.valid(pathEntity) && QTPFS::registry.any_of<QTPFS::PathIsDirty>(pathEntity) ? 1u : 0u,
+		QTPFS::registry.valid(pathEntity) && QTPFS::registry.any_of<QTPFS::PathIsToBeUpdated>(pathEntity) ? 1u : 0u,
+		QTPFS::registry.valid(pathEntity) && QTPFS::registry.any_of<QTPFS::PathUpdatedCounterIncrease>(pathEntity) ? 1u : 0u,
+		QTPFS::registry.valid(pathEntity) && QTPFS::registry.any_of<QTPFS::PathRequeueSearch>(pathEntity) ? 1u : 0u,
+		QTPFS::registry.valid(pathEntity) && QTPFS::registry.any_of<QTPFS::PathSearchRef>(pathEntity) ? 1u : 0u,
+		alreadyDirty ? 1u : 0u,
+		markedDirty ? 1u : 0u,
+		(dirtyPathDetail != nullptr && dirtyPathDetail->clearPath) ? 1u : 0u,
+		(dirtyPathDetail != nullptr && dirtyPathDetail->clearSharing) ? 1u : 0u,
+		(dirtyPathDetail != nullptr) ? dirtyPathDetail->autoRepathTrigger : 0,
+		(dirtyPathDetail != nullptr) ? dirtyPathDetail->nodesAreCleanFromNodeId : 0,
+		refreshDirtyPathRateFrame,
+		updateDirtyPathRate,
+		updateDirtyPathRemainder,
+		(path != nullptr) ? ReplayCheckpointPathHashPathHash(0u, path->GetHash()) : 0u,
+		(path != nullptr) ? ReplayCheckpointPathHashPathHash(0u, path->GetVirtualHash()) : 0u,
+		(path != nullptr) ? path->GetSourcePoint().x : 0.0f,
+		(path != nullptr) ? path->GetSourcePoint().y : 0.0f,
+		(path != nullptr) ? path->GetSourcePoint().z : 0.0f,
+		(path != nullptr) ? path->GetTargetPoint().x : 0.0f,
+		(path != nullptr) ? path->GetTargetPoint().y : 0.0f,
+		(path != nullptr) ? path->GetTargetPoint().z : 0.0f
+	);
+}
+
 void QTPFS::PathManager::LogReplayCheckpointStateSignature(const char* label) const
 {
 	const int debugFrame = configHandler->GetInt("ReplayCheckpointDebugSignatureFrame");
@@ -1270,6 +1546,7 @@ void QTPFS::PathManager::LogReplayCheckpointStateSignature(const char* label) co
 	unsigned int dirtyPathCount = 0;
 	unsigned int tempPathCount = 0;
 	unsigned int updatePathCount = 0;
+	unsigned int updatedCounterPathCount = 0;
 	unsigned int requeuePathCount = 0;
 	unsigned int searchRefCount = 0;
 	unsigned int searchModePathCount = 0;
@@ -1330,6 +1607,7 @@ void QTPFS::PathManager::LogReplayCheckpointStateSignature(const char* label) co
 		dirtyPathCount += registry.any_of<PathIsDirty>(entity);
 		tempPathCount += registry.any_of<PathIsTemp>(entity);
 		updatePathCount += registry.any_of<PathIsToBeUpdated>(entity);
+		updatedCounterPathCount += registry.any_of<PathUpdatedCounterIncrease>(entity);
 		requeuePathCount += registry.any_of<PathRequeueSearch>(entity);
 		searchRefCount += registry.any_of<PathSearchRef>(entity);
 		searchModePathCount += registry.any_of<SearchModeIPath>(entity);
@@ -1347,8 +1625,50 @@ void QTPFS::PathManager::LogReplayCheckpointStateSignature(const char* label) co
 	});
 
 	const ReplayCheckpointRegistrySignature registrySignature = GetReplayCheckpointRegistrySignature();
+	uint32_t mapDamageQueueHash = 0x6a758331u;
+	uint32_t mapDamageMapHash = 0xf02d9173u;
+	uint32_t pathCacheDirtyHash = 0x41d3b7efu;
+	unsigned int mapDamageQueueCount = 0;
+	unsigned int mapDamageMapCount = 0;
+	unsigned int pathCacheDirtyCount = 0;
 
-	LOG("[ReplayCheckpoint][qtpfs-sig] %s frame=%d live=%u size=%u released=%u freeCount=%u freeComplete=%u entityTableHash=%08x freeHash=%08x paths=%u nonPath=%u empty=%u unsyncedPaths=%u externalPaths=%u searches=%u dirty=%u temp=%u update=%u requeue=%u searchRefs=%u searchMode=%u delayedDelete=%u sharedChains=%u partialChains=%u pathHash=%08x searchHash=%08x",
+	for (uint32_t layer = 0; layer < nodeLayersMapDamageTrack.mapChangeTrackers.size(); ++layer) {
+		const MapChangeTrack& tracker = nodeLayersMapDamageTrack.mapChangeTrackers[layer];
+		mapDamageQueueCount += static_cast<unsigned int>(tracker.damageQueue.size());
+		mapDamageQueueHash = ReplayCheckpointPathHashUInt(mapDamageQueueHash, layer);
+		mapDamageQueueHash = ReplayCheckpointPathHashUInt(mapDamageQueueHash, static_cast<uint32_t>(tracker.damageQueue.size()));
+
+		for (const int sectorID: tracker.damageQueue)
+			mapDamageQueueHash = ReplayCheckpointPathHashUInt(mapDamageQueueHash, static_cast<uint32_t>(sectorID));
+
+		mapDamageMapHash = ReplayCheckpointPathHashUInt(mapDamageMapHash, layer);
+		mapDamageMapHash = ReplayCheckpointPathHashUInt(mapDamageMapHash, static_cast<uint32_t>(tracker.damageMap.size()));
+
+		for (std::size_t sectorID = 0; sectorID < tracker.damageMap.size(); ++sectorID) {
+			if (!tracker.damageMap[sectorID])
+				continue;
+
+			++mapDamageMapCount;
+			mapDamageMapHash = ReplayCheckpointPathHashUInt(mapDamageMapHash, static_cast<uint32_t>(sectorID));
+		}
+	}
+
+	for (uint32_t layer = 0; layer < pathCache.dirtyPaths.size(); ++layer) {
+		const std::vector<PathCache::DirtyPathDetail>& dirtyPaths = pathCache.dirtyPaths[layer];
+		pathCacheDirtyCount += static_cast<unsigned int>(dirtyPaths.size());
+		pathCacheDirtyHash = ReplayCheckpointPathHashUInt(pathCacheDirtyHash, layer);
+		pathCacheDirtyHash = ReplayCheckpointPathHashUInt(pathCacheDirtyHash, static_cast<uint32_t>(dirtyPaths.size()));
+
+		for (const PathCache::DirtyPathDetail& detail: dirtyPaths) {
+			pathCacheDirtyHash = ReplayCheckpointPathHashUInt(pathCacheDirtyHash, static_cast<uint32_t>(entt::to_integral(detail.pathEntity)));
+			pathCacheDirtyHash = ReplayCheckpointPathHashUInt(pathCacheDirtyHash, static_cast<uint32_t>(detail.autoRepathTrigger));
+			pathCacheDirtyHash = ReplayCheckpointPathHashUInt(pathCacheDirtyHash, static_cast<uint32_t>(detail.nodesAreCleanFromNodeId));
+			pathCacheDirtyHash = ReplayCheckpointPathHashUInt(pathCacheDirtyHash, detail.clearPath ? 1u : 0u);
+			pathCacheDirtyHash = ReplayCheckpointPathHashUInt(pathCacheDirtyHash, detail.clearSharing ? 1u : 0u);
+		}
+	}
+
+	LOG("[ReplayCheckpoint][qtpfs-sig] %s frame=%d live=%u size=%u released=%u freeCount=%u freeComplete=%u entityTableHash=%08x freeHash=%08x paths=%u nonPath=%u empty=%u unsyncedPaths=%u externalPaths=%u searches=%u dirty=%u temp=%u update=%u updatedCounter=%u requeue=%u searchRefs=%u searchMode=%u delayedDelete=%u sharedChains=%u partialChains=%u refresh=%d dirtyRate=%d dirtyRemainder=%d mapDamage=%u mapDamageHash=%08x damageMap=%u damageMapHash=%08x cacheDirty=%u cacheDirtyHash=%08x pathHash=%08x searchHash=%08x",
 		label,
 		gs->frameNum,
 		static_cast<unsigned int>(registry.alive()),
@@ -1367,18 +1687,29 @@ void QTPFS::PathManager::LogReplayCheckpointStateSignature(const char* label) co
 		dirtyPathCount,
 		tempPathCount,
 		updatePathCount,
+		updatedCounterPathCount,
 		requeuePathCount,
 		searchRefCount,
 		searchModePathCount,
 		delayedDeletePathCount,
 		sharedPathChainCount,
 		partialSharedPathChainCount,
+		refreshDirtyPathRateFrame,
+		updateDirtyPathRate,
+		updateDirtyPathRemainder,
+		mapDamageQueueCount,
+		mapDamageQueueHash,
+		mapDamageMapCount,
+		mapDamageMapHash,
+		pathCacheDirtyCount,
+		pathCacheDirtyHash,
 		pathHash,
 		searchHash
 	);
 
 	for (const NodeLayer& nodeLayer: nodeLayers) {
 		uint32_t layerHash = 0xa17e4b29u;
+		uint32_t statusCacheHash = ReplayCheckpointPathHashNodeLayerStatusCache(0x25ad8c4fu, nodeLayer);
 
 		for (int rootIndex = 0; rootIndex < nodeLayer.GetRootNodeCount(); ++rootIndex) {
 			const INode* rootNode = nodeLayer.GetPoolNode(rootIndex);
@@ -1386,7 +1717,7 @@ void QTPFS::PathManager::LogReplayCheckpointStateSignature(const char* label) co
 			layerHash = ReplayCheckpointPathHashUInt64(layerHash, rootChecksum);
 		}
 
-		LOG("[ReplayCheckpoint][qtpfs-layer] %s frame=%d type=%d roots=%u nodes=%u maxAlloc=%u leaf=%u open=%u closed=%u rootMask=%08x layerHash=%08x",
+		LOG("[ReplayCheckpoint][qtpfs-layer] %s frame=%d type=%d roots=%u nodes=%u maxAlloc=%u leaf=%u open=%u closed=%u rootMask=%08x layerHash=%08x statusHash=%08x",
 			label,
 			gs->frameNum,
 			nodeLayer.GetNodelayer(),
@@ -1397,7 +1728,8 @@ void QTPFS::PathManager::LogReplayCheckpointStateSignature(const char* label) co
 			nodeLayer.GetNumOpenNodes(),
 			nodeLayer.GetNumClosedNodes(),
 			nodeLayer.GetRootMask(),
-			layerHash
+			layerHash,
+			statusCacheHash
 		);
 
 		if (nodeLayer.GetNodelayer() != 11)
@@ -1491,7 +1823,7 @@ void QTPFS::PathManager::LogReplayCheckpointStateSignature(const char* label) co
 		const uint32_t sharedHead = (sharedIt != sharedPaths.end() && sharedIt->second == entity) ? 1u : 0u;
 		const uint32_t partialHead = (partialIt != partialSharedPaths.end() && partialIt->second == entity) ? 1u : 0u;
 
-		LOG("[ReplayCheckpoint][qtpfs-path] %s frame=%d entity=%u id=%u owner=%d type=%d points=%u nodes=%u next=%u repath=%u updates=%u firstClean=%u hash=%08x virtual=%08x pointHash=%08x synced=%u full=%u partial=%u raw=%u dirty=%u temp=%u update=%u requeue=%u searchRef=%u searchMode=%u delayedDelete=%u sharedChain=%u sharedHead=%u sharedPrev=%u sharedNext=%u partialChain=%u partialHead=%u partialPrev=%u partialNext=%u source=<%.8g,%.8g,%.8g> target=<%.8g,%.8g,%.8g> goal=<%.8g,%.8g,%.8g> bboxMin=<%.8g,%.8g,%.8g> bboxMax=<%.8g,%.8g,%.8g>",
+		LOG("[ReplayCheckpoint][qtpfs-path] %s frame=%d entity=%u id=%u owner=%d type=%d points=%u nodes=%u next=%u repath=%u updates=%u firstClean=%u hash=%08x virtual=%08x pointHash=%08x synced=%u full=%u partial=%u raw=%u dirty=%u temp=%u update=%u updatedCounter=%u requeue=%u searchRef=%u searchMode=%u delayedDelete=%u sharedChain=%u sharedHead=%u sharedPrev=%u sharedNext=%u partialChain=%u partialHead=%u partialPrev=%u partialNext=%u source=<%.8g,%.8g,%.8g> target=<%.8g,%.8g,%.8g> goal=<%.8g,%.8g,%.8g> bboxMin=<%.8g,%.8g,%.8g> bboxMax=<%.8g,%.8g,%.8g>",
 			label,
 			gs->frameNum,
 			static_cast<unsigned int>(entt::to_integral(entity)),
@@ -1514,6 +1846,7 @@ void QTPFS::PathManager::LogReplayCheckpointStateSignature(const char* label) co
 			registry.any_of<PathIsDirty>(entity) ? 1u : 0u,
 			registry.any_of<PathIsTemp>(entity) ? 1u : 0u,
 			registry.any_of<PathIsToBeUpdated>(entity) ? 1u : 0u,
+			registry.any_of<PathUpdatedCounterIncrease>(entity) ? 1u : 0u,
 			registry.any_of<PathRequeueSearch>(entity) ? 1u : 0u,
 			registry.any_of<PathSearchRef>(entity) ? 1u : 0u,
 			registry.any_of<SearchModeIPath>(entity) ? 1u : 0u,
@@ -1978,6 +2311,14 @@ void QTPFS::PathManager::UpdateNodeLayer(unsigned int layerNum, const SRectangle
 	assert(re.x2 >= r.x2);
 	assert(re.z2 >= r.z2);
 
+	const bool debugStatusCacheSector = ReplayCheckpointDebugQTPFSStatusCacheSector(layerNum, r);
+	NodeLayer::NodeSpeedBinCache statusCacheBefore;
+	uint32_t statusCacheHashBefore = 0u;
+	if (debugStatusCacheSector) {
+		statusCacheBefore = nodeLayers[layerNum].GetNodeSpeedBinCache(r.x1, r.z1);
+		statusCacheHashBefore = ReplayCheckpointPathHashNodeSpeedBinCache(0x25ad8c4fu, statusCacheBefore);
+	}
+
 	// { bool printMoveInfo = (selectedUnitsHandler.selectedUnits.size() == 1);
 	// 	if (printMoveInfo) {
 	// 		for (const int unitID: selectedUnitsHandler.selectedUnits) {
@@ -1990,6 +2331,41 @@ void QTPFS::PathManager::UpdateNodeLayer(unsigned int layerNum, const SRectangle
 
 	updateThreadData[currentThread].InitUpdate(r, *containingNode, *md, currentThread);
 	const bool needTesselation = nodeLayers[layerNum].Update(updateThreadData[currentThread]);
+
+	if (debugStatusCacheSector) {
+		const NodeLayer::NodeSpeedBinCache& statusCacheAfter = nodeLayers[layerNum].GetNodeSpeedBinCache(r.x1, r.z1);
+		const uint32_t statusCacheHashAfter = ReplayCheckpointPathHashNodeSpeedBinCache(0x25ad8c4fu, statusCacheAfter);
+		uint32_t firstChangeIndex = 0u;
+		uint32_t firstBefore = 0u;
+		uint32_t firstAfter = 0u;
+		const unsigned int changedCells = ReplayCheckpointCountNodeSpeedBinCacheChanges(
+			statusCacheBefore,
+			statusCacheAfter,
+			firstChangeIndex,
+			firstBefore,
+			firstAfter
+		);
+
+		LOG("[ReplayCheckpoint][qtpfs-status-cache] update frame=%d type=%u rect=<%d,%d,%d,%d> relink=<%d,%d,%d,%d> need=%u before=%08x after=%08x changed=%u first=%u firstBefore=%u firstAfter=%u",
+			gs->frameNum,
+			layerNum,
+			r.x1,
+			r.z1,
+			r.x2,
+			r.z2,
+			re.x1,
+			re.z1,
+			re.x2,
+			re.z2,
+			needTesselation ? 1u : 0u,
+			statusCacheHashBefore,
+			statusCacheHashAfter,
+			changedCells,
+			firstChangeIndex,
+			firstBefore,
+			firstAfter
+		);
+	}
 
 	// process the affected root nodes.
 
@@ -2107,6 +2483,17 @@ void QTPFS::PathManager::Update() {
 
 				// If the path was going to be deleted anyway, then remove it instead of marking for rebuild.
 				if (registry.all_of<PathDelayedDelete>(pathEntity)) {
+					LogReplayCheckpointDirtyPathEvent(
+						"dirty-cache-delayed-delete",
+						pathEntity,
+						refreshDirtyPathRateFrame,
+						updateDirtyPathRate,
+						updateDirtyPathRemainder,
+						0u,
+						&dirtyPathDetail,
+						registry.all_of<PathIsDirty>(pathEntity),
+						false
+					);
 					DeletePathEntity(pathEntity);
 					continue;
 				}
@@ -2114,10 +2501,14 @@ void QTPFS::PathManager::Update() {
 				// TODO: perhaps not mark paths multiple times if multiple blocks are updated in same frame?
 				// if (registry.all_of<PathIsDirty>(pathEntity)) { continue; }
 
-				if ( !registry.all_of<PathIsDirty>(pathEntity) ) {
+				const bool alreadyDirty = registry.all_of<PathIsDirty>(pathEntity);
+				bool markedDirty = false;
+
+				if (!alreadyDirty) {
 					if (dirtyPathDetail.clearPath) {
 						registry.emplace<PathIsDirty>(pathEntity);
 						pathsMarkedDirty++;
+						markedDirty = true;
 					}
 				// currently always true
 				//if (dirtyPathDetail.clearSharing) {
@@ -2149,12 +2540,35 @@ void QTPFS::PathManager::Update() {
 					// if (path.IsBoundingBoxOverriden())
 						path.SetBoundingBox();
 				//}
+
+					LogReplayCheckpointDirtyPathEvent(
+						"dirty-cache-apply",
+						pathEntity,
+						refreshDirtyPathRateFrame,
+						updateDirtyPathRate,
+						updateDirtyPathRemainder,
+						0u,
+						&dirtyPathDetail,
+						alreadyDirty,
+						markedDirty
+					);
 			}
 			layerDirtyPaths.clear();
 			// LOG("%s: end: %d", __func__, (int)layerDirtyPaths.size());
 		}
+		const std::int32_t oldRefreshDirtyPathRateFrame = refreshDirtyPathRateFrame;
 		if (refreshDirtyPathRateFrame == QTPFS_LAST_FRAME && pathsMarkedDirty > 0)
 			refreshDirtyPathRateFrame = gs->frameNum + GAME_SPEED;
+		if (ReplayCheckpointDebugQTPFSLifecycleFrame() && pathsMarkedDirty > 0) {
+			LOG("[ReplayCheckpoint][qtpfs-dirty] dirty-cache-summary frame=%d marked=%d refreshOld=%d refreshNew=%d dirtyRate=%d dirtyRemainder=%d",
+				gs->frameNum,
+				pathsMarkedDirty,
+				oldRefreshDirtyPathRateFrame,
+				refreshDirtyPathRateFrame,
+				updateDirtyPathRate,
+				updateDirtyPathRemainder
+			);
+		}
 	}
 	{
 		ThreadUpdate();
@@ -2633,20 +3047,47 @@ void QTPFS::PathManager::QueueDeadPathSearches() {
 		// 		);
 		auto dirtyView = registry.view<PathIsDirty>();
 		auto pathsToUpdate = dirtyView.size();
+		if (ReplayCheckpointDebugQTPFSLifecycleFrame()) {
+			LOG("[ReplayCheckpoint][qtpfs-dirty] dirty-batch-start frame=%d dirty=%u refresh=%d dirtyRate=%d dirtyRemainder=%d",
+				gs->frameNum,
+				static_cast<unsigned int>(pathsToUpdate),
+				refreshDirtyPathRateFrame,
+				updateDirtyPathRate,
+				updateDirtyPathRemainder
+			);
+		}
 		// LOG("%s: dirtyView=%d", __func__, (int)pathsToUpdate);
 		if (pathsToUpdate > 0) {
 			const std::vector<QTPFS::entity> dirtyPathEntities =
 				CollectReplayCheckpointSortedEntities(dirtyView, LessReplayCheckpointPathEntity);
 
+			unsigned int queueSlot = 0u;
 			for (const QTPFS::entity path: dirtyPathEntities) {
 				if (!registry.valid(path) || !registry.all_of<PathIsDirty>(path))
 					continue;
 
 				assert(!registry.any_of<PathIsToBeUpdated>(path));
 				registry.emplace<PathIsToBeUpdated>(path);
+				LogReplayCheckpointDirtyPathEvent(
+					"dirty-batch-queue",
+					path,
+					refreshDirtyPathRateFrame,
+					updateDirtyPathRate,
+					updateDirtyPathRemainder,
+					queueSlot
+				);
+				++queueSlot;
 			}
 			updateDirtyPathRate = pathsToUpdate / GAME_SPEED;
 			updateDirtyPathRemainder = pathsToUpdate % GAME_SPEED;
+			if (ReplayCheckpointDebugQTPFSLifecycleFrame()) {
+				LOG("[ReplayCheckpoint][qtpfs-dirty] dirty-batch-rate frame=%d dirty=%u rate=%d remainder=%d",
+					gs->frameNum,
+					static_cast<unsigned int>(pathsToUpdate),
+					updateDirtyPathRate,
+					updateDirtyPathRemainder
+				);
+			}
 			// LOG("%s: updateDirtyPathRate=%d,updateDirtyPathRemainder=%d", __func__
 			// 		, updateDirtyPathRate, updateDirtyPathRemainder
 			// 		);
@@ -2674,6 +3115,14 @@ void QTPFS::PathManager::QueueDeadPathSearches() {
 			assert(registry.all_of<PathIsToBeUpdated>(entity));
 			registry.remove<PathIsToBeUpdated>(entity);
 			registry.emplace_or_replace<PathUpdatedCounterIncrease>(entity);
+			LogReplayCheckpointDirtyPathEvent(
+				"dirty-batch-requeue",
+				entity,
+				refreshDirtyPathRateFrame,
+				updateDirtyPathRate,
+				updateDirtyPathRemainder,
+				static_cast<unsigned int>(i)
+			);
 
 			RequeueSearch(path, true, false, true);
 		}

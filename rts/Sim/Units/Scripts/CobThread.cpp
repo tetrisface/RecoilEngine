@@ -16,6 +16,8 @@
 #include "System/Misc/TracyDefs.h"
 #include "System/SpringHash.h"
 
+CONFIG(int, ReplayCheckpointDebugCobUnitID).defaultValue(-2).description("Unit ID for replay checkpoint COB/unit-script diagnostics; -2 disables them, -1 logs all units on the debug frame");
+
 CR_BIND(CCobThread, )
 
 CR_REG_METADATA(CCobThread, (
@@ -54,6 +56,33 @@ CR_REG_METADATA_SUB(CCobThread, CallInfo,(
 
 std::vector<decltype(CCobThread::dataStack)> CCobThread::freeDataStacks;
 std::vector<decltype(CCobThread::callStack)> CCobThread::freeCallStacks;
+
+static bool ReplayCheckpointDebugCobFrame()
+{
+	return (gs != nullptr && configHandler != nullptr && gs->frameNum == configHandler->GetInt("ReplayCheckpointDebugSignatureFrame"));
+}
+
+static int ReplayCheckpointCobOwnerID(const CCobThread* thread)
+{
+	if (thread == nullptr || thread->cobInst == nullptr || thread->cobInst->GetUnit() == nullptr)
+		return -1;
+
+	return thread->cobInst->GetUnit()->id;
+}
+
+static bool ReplayCheckpointShouldLogCobThread(const CCobThread* thread)
+{
+	const int debugUnitID = configHandler->GetInt("ReplayCheckpointDebugCobUnitID");
+	return (ReplayCheckpointDebugCobFrame() && (debugUnitID == -1 || ReplayCheckpointCobOwnerID(thread) == debugUnitID));
+}
+
+static int ReplayCheckpointCobStackValue(const CCobThread* thread, const std::size_t offsetFromTop)
+{
+	if (thread == nullptr || thread->GetDataStackSize() <= offsetFromTop)
+		return 0;
+
+	return thread->GetStackVal(static_cast<int>(thread->GetDataStackSize() - 1 - offsetFromTop));
+}
 
 CCobThread::CCobThread(CCobInstance* _cobInst)
 	: cobInst(_cobInst)
@@ -220,18 +249,19 @@ const std::string& CCobThread::GetName()
 	return cobFile->scriptNames[callStack[0].functionId];
 }
 
-static constexpr int REPLAY_CHECKPOINT_DEBUG_COB_THREAD_UNIT_ID = 15919;
-
 static bool ReplayCheckpointDebugCobThreadFrame(const CCobInstance* cobInst)
 {
-	return (
-		gs != nullptr &&
-		configHandler != nullptr &&
-		gs->frameNum == configHandler->GetInt("ReplayCheckpointDebugSignatureFrame") &&
-		cobInst != nullptr &&
-		cobInst->GetUnit() != nullptr &&
-		cobInst->GetUnit()->id == REPLAY_CHECKPOINT_DEBUG_COB_THREAD_UNIT_ID
-	);
+	if (
+		gs == nullptr ||
+		configHandler == nullptr ||
+		gs->frameNum != configHandler->GetInt("ReplayCheckpointDebugSignatureFrame") ||
+		cobInst == nullptr ||
+		cobInst->GetUnit() == nullptr
+	)
+		return false;
+
+	const int debugUnitID = configHandler->GetInt("ReplayCheckpointDebugCobUnitID");
+	return (debugUnitID == -1 || cobInst->GetUnit()->id == debugUnitID);
 }
 
 static const char* ReplayCheckpointCobThreadFunctionName(const CCobFile* cobFile, int functionId)
@@ -296,15 +326,62 @@ bool CCobThread::Tick()
 
 	while (state == Run) {
 		const int opcode = GET_LONG_PC();
+		const int opPc = pc - 1;
+
+		if (ReplayCheckpointShouldLogCobThread(this)) {
+			LOG("[ReplayCheckpoint][cob-op] frame=%d time=%d owner=%d thread=%d pc=%d opcode=%08x state=%d stack=%u|%08x top=%d,%d,%d,%d call=%u|%08x",
+				gs->frameNum,
+				(cobEngine != nullptr) ? cobEngine->GetCurrTime() : -1,
+				ReplayCheckpointCobOwnerID(this),
+				id,
+				opPc,
+				opcode,
+				state,
+				static_cast<unsigned int>(GetDataStackSize()),
+				GetDataStackChecksum(),
+				ReplayCheckpointCobStackValue(this, 0),
+				ReplayCheckpointCobStackValue(this, 1),
+				ReplayCheckpointCobStackValue(this, 2),
+				ReplayCheckpointCobStackValue(this, 3),
+				static_cast<unsigned int>(GetCallStackSize()),
+				GetCallStackChecksum()
+			);
+		}
 
 		switch (opcode) {
 			case PUSH_CONSTANT: {
 				r1 = GET_LONG_PC();
 				PushDataStack(r1);
+				if (ReplayCheckpointShouldLogCobThread(this)) {
+					LOG("[ReplayCheckpoint][cob-stack] pushc frame=%d owner=%d thread=%d pc=%d value=%d stack=%u|%08x",
+						gs->frameNum,
+						ReplayCheckpointCobOwnerID(this),
+						id,
+						opPc,
+						r1,
+						static_cast<unsigned int>(GetDataStackSize()),
+						GetDataStackChecksum()
+					);
+				}
 			} break;
 			case SLEEP: {
 				r1 = PopDataStack();
 				wakeTime = cobEngine->GetCurrTime() + r1;
+				if (ReplayCheckpointShouldLogCobThread(this)) {
+					LOG("[ReplayCheckpoint][cob-sleep] frame=%d time=%d owner=%d thread=%d pc=%d duration=%d wake=%d stack=%u|%08x call=%u|%08x",
+						gs->frameNum,
+						(cobEngine != nullptr) ? cobEngine->GetCurrTime() : -1,
+						ReplayCheckpointCobOwnerID(this),
+						id,
+						opPc,
+						r1,
+						wakeTime,
+						static_cast<unsigned int>(GetDataStackSize()),
+						GetDataStackChecksum(),
+						static_cast<unsigned int>(GetCallStackSize()),
+						GetCallStackChecksum()
+					);
+				}
 				state = Sleep;
 
 				cobEngine->ScheduleThread(this);
@@ -467,11 +544,36 @@ bool CCobThread::Tick()
 			case GET_UNIT_VALUE: {
 				r1 = PopDataStack();
 				if ((r1 >= LUA0) && (r1 <= LUA9)) {
-					PushDataStack(luaArgs[r1 - LUA0]);
+					r2 = luaArgs[r1 - LUA0];
+					PushDataStack(r2);
+					if (ReplayCheckpointShouldLogCobThread(this)) {
+						LOG("[ReplayCheckpoint][cob-stack] getuv-lua frame=%d owner=%d thread=%d pc=%d key=%d result=%d stack=%u|%08x",
+							gs->frameNum,
+							ReplayCheckpointCobOwnerID(this),
+							id,
+							opPc,
+							r1,
+							r2,
+							static_cast<unsigned int>(GetDataStackSize()),
+							GetDataStackChecksum()
+						);
+					}
 					break;
 				}
-				r1 = cobInst->GetUnitVal(r1, 0, 0, 0, 0);
-				PushDataStack(r1);
+				r2 = cobInst->GetUnitVal(r1, 0, 0, 0, 0);
+				PushDataStack(r2);
+				if (ReplayCheckpointShouldLogCobThread(this)) {
+					LOG("[ReplayCheckpoint][cob-stack] getuv frame=%d owner=%d thread=%d pc=%d key=%d result=%d stack=%u|%08x",
+						gs->frameNum,
+						ReplayCheckpointCobOwnerID(this),
+						id,
+						opPc,
+						r1,
+						r2,
+						static_cast<unsigned int>(GetDataStackSize()),
+						GetDataStackChecksum()
+					);
+				}
 			} break;
 
 
@@ -500,6 +602,19 @@ bool CCobThread::Tick()
 				r1 = GET_LONG_PC();
 				r2 = dataStack[LocalStackFrame() + r1];
 				PushDataStack(r2);
+				if (ReplayCheckpointShouldLogCobThread(this)) {
+					LOG("[ReplayCheckpoint][cob-stack] pushl frame=%d owner=%d thread=%d pc=%d index=%d value=%d stackFrame=%d stack=%u|%08x",
+						gs->frameNum,
+						ReplayCheckpointCobOwnerID(this),
+						id,
+						opPc,
+						r1,
+						r2,
+						LocalStackFrame(),
+						static_cast<unsigned int>(GetDataStackSize()),
+						GetDataStackChecksum()
+					);
+				}
 			} break;
 
 
@@ -526,6 +641,16 @@ bool CCobThread::Tick()
 			case EXPLODE: {
 				r1 = GET_LONG_PC();
 				r2 = PopDataStack();
+				if (ReplayCheckpointShouldLogCobThread(this)) {
+					LOG("[ReplayCheckpoint][cob-rng] explode frame=%d owner=%d thread=%d pc=%d piece=%d flags=%d rng=%llu",
+						gs->frameNum,
+						ReplayCheckpointCobOwnerID(this),
+						id,
+						pc,
+						r1,
+						r2,
+						static_cast<unsigned long long>(gsRNG.GetGenState()));
+				}
 				cobInst->Explode(r1, r2);
 			} break;
 
@@ -538,8 +663,22 @@ bool CCobThread::Tick()
 			case PUSH_STATIC: {
 				r1 = GET_LONG_PC();
 
-				if (static_cast<size_t>(r1) < cobInst->staticVars.size())
-					PushDataStack(cobInst->staticVars[r1]);
+				if (static_cast<size_t>(r1) < cobInst->staticVars.size()) {
+					r2 = cobInst->staticVars[r1];
+					PushDataStack(r2);
+					if (ReplayCheckpointShouldLogCobThread(this)) {
+						LOG("[ReplayCheckpoint][cob-stack] pushs frame=%d owner=%d thread=%d pc=%d index=%d value=%d stack=%u|%08x",
+							gs->frameNum,
+							ReplayCheckpointCobOwnerID(this),
+							id,
+							opPc,
+							r1,
+							r2,
+							static_cast<unsigned int>(GetDataStackSize()),
+							GetDataStackChecksum()
+						);
+					}
+				}
 			} break;
 
 			case SET_NOT_EQUAL: {
@@ -584,7 +723,20 @@ bool CCobThread::Tick()
 			case RAND: {
 				r2 = PopDataStack();
 				r1 = PopDataStack();
+				const auto rngBefore = gsRNG.GetGenState();
 				r3 = gsRNG.NextInt(r2 - r1 + 1) + r1;
+				if (ReplayCheckpointShouldLogCobThread(this)) {
+					LOG("[ReplayCheckpoint][cob-rng] rand frame=%d owner=%d thread=%d pc=%d min=%d max=%d result=%d rngBefore=%llu rngAfter=%llu",
+						gs->frameNum,
+						ReplayCheckpointCobOwnerID(this),
+						id,
+						pc,
+						r1,
+						r2,
+						r3,
+						static_cast<unsigned long long>(rngBefore),
+						static_cast<unsigned long long>(gsRNG.GetGenState()));
+				}
 				PushDataStack(r3);
 			} break;
 			case EMIT_SFX: {
@@ -624,11 +776,44 @@ bool CCobThread::Tick()
 				r2 = PopDataStack();
 				r1 = PopDataStack();
 				if ((r1 >= LUA0) && (r1 <= LUA9)) {
-					PushDataStack(luaArgs[r1 - LUA0]);
+					r6 = luaArgs[r1 - LUA0];
+					PushDataStack(r6);
+					if (ReplayCheckpointShouldLogCobThread(this)) {
+						LOG("[ReplayCheckpoint][cob-stack] get-lua frame=%d owner=%d thread=%d pc=%d key=%d args=%d,%d,%d,%d result=%d stack=%u|%08x",
+							gs->frameNum,
+							ReplayCheckpointCobOwnerID(this),
+							id,
+							opPc,
+							r1,
+							r2,
+							r3,
+							r4,
+							r5,
+							r6,
+							static_cast<unsigned int>(GetDataStackSize()),
+							GetDataStackChecksum()
+						);
+					}
 					break;
 				}
 				r6 = cobInst->GetUnitVal(r1, r2, r3, r4, r5);
 				PushDataStack(r6);
+				if (ReplayCheckpointShouldLogCobThread(this)) {
+					LOG("[ReplayCheckpoint][cob-stack] get frame=%d owner=%d thread=%d pc=%d key=%d args=%d,%d,%d,%d result=%d stack=%u|%08x",
+						gs->frameNum,
+						ReplayCheckpointCobOwnerID(this),
+						id,
+						opPc,
+						r1,
+						r2,
+						r3,
+						r4,
+						r5,
+						r6,
+						static_cast<unsigned int>(GetDataStackSize()),
+						GetDataStackChecksum()
+					);
+				}
 			} break;
 			case ADD: {
 				r2 = PopDataStack();

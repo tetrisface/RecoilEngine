@@ -90,6 +90,7 @@ private:
 	void SerializeMapChangesBeforeMatch(creg::ISerializer* s);
 	void SerializeMapChangesDuringMatch(creg::ISerializer* s);
 	void SerializeMapChanges(creg::ISerializer* s, const float* refHeightMap, float* modifiedHeightMap);
+	void SerializeDerivedHeightMapState(creg::ISerializer* s);
 	void SerializeTypeMap(creg::ISerializer* s);
 
 public:

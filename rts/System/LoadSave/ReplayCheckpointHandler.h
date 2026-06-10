@@ -22,7 +22,6 @@ namespace ReplayCheckpointHandler
 
 	std::string GetBundleDirForDemo(const std::string& demoPath);
 	std::string MakeSaveFileName(int frame);
-	std::string MakeBundledSaveFileName(int frame, const std::string& bundleDir);
 
 	void InitPlaybackContext(const std::string& demoPath);
 	void UpdateRecordingContext();

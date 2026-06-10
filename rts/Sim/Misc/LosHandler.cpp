@@ -8,8 +8,11 @@
 #include "Sim/Misc/TeamHandler.h"
 #include "Sim/Misc/ModInfo.h"
 #include "Map/ReadMap.h"
+#include "Sim/Misc/GlobalSynced.h"
+#include "System/Config/ConfigHandler.h"
 #include "System/Log/ILog.h"
 #include "System/SpringHash.h"
+#include "System/Sync/SyncChecker.h"
 #include "System/creg/STL_Deque.h"
 #include "System/EventHandler.h"
 #include "System/SafeUtil.h"
@@ -20,6 +23,9 @@
 #endif
 
 #include "System/Misc/TracyDefs.h"
+
+#include <algorithm>
+#include <cstdint>
 
 #define USE_STAGGERED_UPDATES 0
 
@@ -119,6 +125,415 @@ static void RestoreReplayCheckpointLosMaps(const ReplayCheckpointLosMapSnapshot&
 			lt->losMaps[allyTeamIdx].SetLosMap(savedMap);
 		}
 	}
+}
+
+static uint32_t ReplayCheckpointLosHashInt(uint32_t hash, int value)
+{
+	return spring::LiteHash(&value, sizeof(value), hash);
+}
+
+static uint32_t ReplayCheckpointLosHashUInt(uint32_t hash, uint32_t value)
+{
+	return spring::LiteHash(&value, sizeof(value), hash);
+}
+
+static uint32_t ReplayCheckpointLosHashFloat(uint32_t hash, float value)
+{
+	return spring::LiteHash(&value, sizeof(value), hash);
+}
+
+static uint32_t ReplayCheckpointLosHashInt2(uint32_t hash, const int2& value)
+{
+	hash = ReplayCheckpointLosHashInt(hash, value.x);
+	hash = ReplayCheckpointLosHashInt(hash, value.y);
+	return hash;
+}
+
+template<typename T>
+static uint32_t ReplayCheckpointLosHashVectorRaw(uint32_t hash, const std::vector<T>& values)
+{
+	hash = ReplayCheckpointLosHashUInt(hash, static_cast<uint32_t>(values.size()));
+	if (!values.empty())
+		hash = spring::LiteHash(values.data(), static_cast<unsigned>(values.size() * sizeof(T)), hash);
+	return hash;
+}
+
+static uint32_t ReplayCheckpointLosHashInstancePtr(uint32_t hash, const SLosInstance* instance)
+{
+	return ReplayCheckpointLosHashInt(hash, (instance != nullptr) ? instance->id : -1);
+}
+
+static uint32_t ReplayCheckpointLosHashInstanceQueue(uint32_t hash, const std::deque<SLosInstance*>& queue)
+{
+	hash = ReplayCheckpointLosHashUInt(hash, static_cast<uint32_t>(queue.size()));
+
+	for (const SLosInstance* instance: queue)
+		hash = ReplayCheckpointLosHashInstancePtr(hash, instance);
+
+	return hash;
+}
+
+#ifdef USING_CREG
+namespace {
+	static void SerializeReplayCheckpointBoolByte(creg::ISerializer* s, bool& value)
+	{
+		uint8_t storedValue = value ? 1u : 0u;
+		s->Serialize(storedValue);
+		if (!s->IsWriting())
+			value = (storedValue != 0u);
+	}
+
+	template<typename T>
+	static void SerializeReplayCheckpointVectorRaw(creg::ISerializer* s, std::vector<T>& values)
+	{
+		uint32_t valueCount = static_cast<uint32_t>(values.size());
+		s->Serialize(valueCount);
+		if (!s->IsWriting())
+			values.resize(valueCount);
+		if (!values.empty())
+			s->Serialize(values.data(), static_cast<int>(values.size() * sizeof(T)));
+	}
+
+	static int32_t GetReplayCheckpointLosInstanceId(const ILosType& losType, const SLosInstance* instance)
+	{
+		if (instance == nullptr)
+			return -1;
+
+		assert(instance->id >= 0);
+		assert(static_cast<size_t>(instance->id) < losType.instances.size());
+		assert(&losType.instances[instance->id] == instance);
+		return instance->id;
+	}
+
+	static SLosInstance* GetReplayCheckpointLosInstance(ILosType& losType, int32_t instanceId)
+	{
+		if (instanceId < 0)
+			return nullptr;
+		if (static_cast<size_t>(instanceId) >= losType.instances.size())
+			return nullptr;
+
+		return &losType.instances[instanceId];
+	}
+
+	static void SerializeReplayCheckpointLosInstancePtrDeque(
+		creg::ISerializer* s,
+		ILosType& losType,
+		std::deque<SLosInstance*>& queue
+	)
+	{
+		uint32_t queueSize = static_cast<uint32_t>(queue.size());
+		s->Serialize(queueSize);
+
+		if (!s->IsWriting())
+			queue.clear();
+
+		for (uint32_t i = 0; i < queueSize; ++i) {
+			int32_t instanceId = s->IsWriting() ? GetReplayCheckpointLosInstanceId(losType, queue[i]) : -1;
+			s->Serialize(instanceId);
+
+			if (s->IsWriting())
+				continue;
+
+			if (SLosInstance* instance = GetReplayCheckpointLosInstance(losType, instanceId); instance != nullptr)
+				queue.push_back(instance);
+		}
+	}
+
+	static void SerializeReplayCheckpointUnitLosLinks(
+		creg::ISerializer* s,
+		const std::array<ILosType*, 7>& losTypes
+	)
+	{
+		uint32_t unitCount = static_cast<uint32_t>(unitHandler.GetActiveUnits().size());
+		s->Serialize(unitCount);
+
+		if (!s->IsWriting()) {
+			for (CUnit* unit: unitHandler.GetActiveUnits()) {
+				unit->los.fill(nullptr);
+			}
+		}
+
+		for (uint32_t unitIdx = 0; unitIdx < unitCount; ++unitIdx) {
+			int32_t unitId = -1;
+			CUnit* unit = nullptr;
+
+			if (s->IsWriting()) {
+				unit = unitHandler.GetActiveUnits()[unitIdx];
+				unitId = unit->id;
+			}
+
+			s->Serialize(unitId);
+
+			if (!s->IsWriting())
+				unit = unitHandler.GetUnit(unitId);
+
+			for (size_t typeIdx = 0; typeIdx < losTypes.size(); ++typeIdx) {
+				ILosType* losType = losTypes[typeIdx];
+				int32_t instanceId = -1;
+
+				if (s->IsWriting() && unit != nullptr && losType != nullptr)
+					instanceId = GetReplayCheckpointLosInstanceId(*losType, unit->los[typeIdx]);
+
+				s->Serialize(instanceId);
+
+				if (s->IsWriting() || unit == nullptr || losType == nullptr)
+					continue;
+
+				unit->los[typeIdx] = GetReplayCheckpointLosInstance(*losType, instanceId);
+			}
+		}
+	}
+}
+#endif
+
+
+void SLosInstance::SerializeReplayCheckpoint(creg::ISerializer* s)
+{
+#ifdef USING_CREG
+	s->Serialize(id);
+	s->Serialize(allyteam);
+	s->Serialize(radius);
+	s->Serialize(&basePos, sizeof(basePos));
+	s->Serialize(baseHeight);
+	s->Serialize(refCount);
+	SerializeReplayCheckpointVectorRaw(s, squares);
+	s->Serialize(hashNum);
+	s->Serialize(status);
+	SerializeReplayCheckpointBoolByte(s, isCached);
+	SerializeReplayCheckpointBoolByte(s, isQueuedForUpdate);
+	SerializeReplayCheckpointBoolByte(s, isQueuedForTerraform);
+#endif
+}
+
+
+void ILosType::SerializeReplayCheckpoint(creg::ISerializer* s)
+{
+#ifdef USING_CREG
+	int typeValue = static_cast<int>(type);
+	int algoTypeValue = static_cast<int>(algoType);
+
+	s->Serialize(mipLevel);
+	s->Serialize(mipDiv);
+	s->Serialize(invDiv);
+	s->Serialize(&size, sizeof(size));
+	s->Serialize(typeValue);
+	s->Serialize(algoTypeValue);
+
+	if (!s->IsWriting()) {
+		type = static_cast<LosType>(typeValue);
+		algoType = static_cast<LosAlgoType>(algoTypeValue);
+	}
+
+	uint32_t losMapCount = static_cast<uint32_t>(losMaps.size());
+	s->Serialize(losMapCount);
+
+	for (uint32_t mapIdx = 0; mapIdx < losMapCount; ++mapIdx) {
+		std::vector<unsigned short> mapData;
+		if (s->IsWriting() && mapIdx < losMaps.size())
+			mapData = losMaps[mapIdx].GetLosMap();
+
+		SerializeReplayCheckpointVectorRaw(s, mapData);
+
+		if (s->IsWriting() || mapIdx >= losMaps.size())
+			continue;
+		if (mapData.size() != losMaps[mapIdx].GetLosMap().size())
+			continue;
+
+		losMaps[mapIdx].SetLosMap(mapData);
+	}
+
+	uint32_t instanceCount = static_cast<uint32_t>(instances.size());
+	s->Serialize(instanceCount);
+
+	if (!s->IsWriting()) {
+		instances.clear();
+		for (uint32_t instanceIdx = 0; instanceIdx < instanceCount; ++instanceIdx) {
+			instances.emplace_back(instanceIdx);
+		}
+	}
+
+	for (SLosInstance& instance: instances) {
+		instance.SerializeReplayCheckpoint(s);
+	}
+
+	SerializeReplayCheckpointVectorRaw(s, freeIDs);
+
+	uint32_t hashCount = static_cast<uint32_t>(instanceHashes.size());
+	s->Serialize(hashCount);
+
+	if (s->IsWriting()) {
+		for (const auto& [hashNum, hashInstances]: instanceHashes) {
+			int storedHashNum = hashNum;
+			uint32_t instanceIdCount = static_cast<uint32_t>(hashInstances.size());
+
+			s->Serialize(storedHashNum);
+			s->Serialize(instanceIdCount);
+
+			for (SLosInstance* instance: hashInstances) {
+				int32_t instanceId = GetReplayCheckpointLosInstanceId(*this, instance);
+				s->Serialize(instanceId);
+			}
+		}
+	} else {
+		instanceHashes.clear();
+
+		for (uint32_t hashIdx = 0; hashIdx < hashCount; ++hashIdx) {
+			int hashNum = 0;
+			uint32_t instanceIdCount = 0;
+
+			s->Serialize(hashNum);
+			s->Serialize(instanceIdCount);
+
+			auto& hashInstances = instanceHashes[hashNum];
+			for (uint32_t idIdx = 0; idIdx < instanceIdCount; ++idIdx) {
+				int32_t instanceId = -1;
+				s->Serialize(instanceId);
+
+				if (SLosInstance* instance = GetReplayCheckpointLosInstance(*this, instanceId); instance != nullptr)
+					hashInstances.push_back(instance);
+			}
+		}
+	}
+
+	const auto serializeDelayedQueue = [s, this](std::deque<DelayedInstance>& queue) {
+		uint32_t queueSize = static_cast<uint32_t>(queue.size());
+		s->Serialize(queueSize);
+
+		if (!s->IsWriting())
+			queue.clear();
+
+		for (uint32_t i = 0; i < queueSize; ++i) {
+			int32_t instanceId = -1;
+			int timeoutTime = 0;
+
+			if (s->IsWriting()) {
+				instanceId = GetReplayCheckpointLosInstanceId(*this, queue[i].instance);
+				timeoutTime = queue[i].timeoutTime;
+			}
+
+			s->Serialize(instanceId);
+			s->Serialize(timeoutTime);
+
+			if (s->IsWriting())
+				continue;
+
+			if (SLosInstance* instance = GetReplayCheckpointLosInstance(*this, instanceId); instance != nullptr)
+				queue.push_back({instance, timeoutTime});
+		}
+	};
+
+	serializeDelayedQueue(delayedDeleteQue);
+	serializeDelayedQueue(delayedTerraQue);
+	SerializeReplayCheckpointLosInstancePtrDeque(s, *this, losUpdate);
+	SerializeReplayCheckpointLosInstancePtrDeque(s, *this, losCache);
+
+	if (!s->IsWriting()) {
+		losRemove.clear();
+		losAdd.clear();
+		losDeleted.clear();
+		losRecalc.clear();
+	}
+#endif
+}
+
+uint32_t ILosType::GetReplayCheckpointMapHash() const
+{
+	uint32_t hash = 0x1c0ffee5u;
+
+	hash = ReplayCheckpointLosHashUInt(hash, static_cast<uint32_t>(losMaps.size()));
+	for (const CLosMap& losMap: losMaps) {
+		hash = ReplayCheckpointLosHashVectorRaw(hash, losMap.GetLosMap());
+	}
+
+	return hash;
+}
+
+uint32_t ILosType::GetReplayCheckpointQueueHash() const
+{
+	uint32_t hash = 0x105cafe1u;
+
+	const auto hashDelayedQueue = [](uint32_t queueHash, const std::deque<DelayedInstance>& queue) {
+		queueHash = ReplayCheckpointLosHashUInt(queueHash, static_cast<uint32_t>(queue.size()));
+
+		for (const DelayedInstance& item: queue) {
+			queueHash = ReplayCheckpointLosHashInstancePtr(queueHash, item.instance);
+			queueHash = ReplayCheckpointLosHashInt(queueHash, item.timeoutTime);
+		}
+
+		return queueHash;
+	};
+
+	hash = hashDelayedQueue(hash, delayedDeleteQue);
+	hash = hashDelayedQueue(hash, delayedTerraQue);
+	hash = ReplayCheckpointLosHashInstanceQueue(hash, losUpdate);
+	hash = ReplayCheckpointLosHashInstanceQueue(hash, losCache);
+
+	return hash;
+}
+
+uint32_t ILosType::GetReplayCheckpointStateHash() const
+{
+	uint32_t hash = 0x70551eafU;
+
+	hash = ReplayCheckpointLosHashInt(hash, mipLevel);
+	hash = ReplayCheckpointLosHashInt(hash, mipDiv);
+	hash = ReplayCheckpointLosHashFloat(hash, invDiv);
+	hash = ReplayCheckpointLosHashInt2(hash, size);
+	hash = ReplayCheckpointLosHashInt(hash, static_cast<int>(type));
+	hash = ReplayCheckpointLosHashInt(hash, static_cast<int>(algoType));
+	hash = ReplayCheckpointLosHashUInt(hash, static_cast<uint32_t>(losMaps.size()));
+	hash = ReplayCheckpointLosHashUInt(hash, static_cast<uint32_t>(instances.size()));
+	hash = ReplayCheckpointLosHashUInt(hash, static_cast<uint32_t>(freeIDs.size()));
+
+	hash = ReplayCheckpointLosHashUInt(hash, GetReplayCheckpointMapHash());
+
+	for (size_t instanceIdx = 0; instanceIdx < instances.size(); ++instanceIdx) {
+		const SLosInstance& instance = instances[instanceIdx];
+
+		hash = ReplayCheckpointLosHashUInt(hash, static_cast<uint32_t>(instanceIdx));
+		hash = ReplayCheckpointLosHashInt(hash, instance.id);
+		hash = ReplayCheckpointLosHashInt(hash, instance.allyteam);
+		hash = ReplayCheckpointLosHashInt(hash, instance.radius);
+		hash = ReplayCheckpointLosHashInt2(hash, instance.basePos);
+		hash = ReplayCheckpointLosHashFloat(hash, instance.baseHeight);
+		hash = ReplayCheckpointLosHashInt(hash, instance.refCount);
+		hash = ReplayCheckpointLosHashUInt(hash, static_cast<uint32_t>(instance.squares.size()));
+		for (const SLosInstance::RLE& square: instance.squares) {
+			hash = ReplayCheckpointLosHashInt(hash, square.start);
+			hash = ReplayCheckpointLosHashUInt(hash, square.length);
+		}
+		hash = ReplayCheckpointLosHashInt(hash, instance.hashNum);
+		hash = ReplayCheckpointLosHashInt(hash, instance.status);
+		hash = ReplayCheckpointLosHashUInt(hash, instance.isCached ? 1u : 0u);
+		hash = ReplayCheckpointLosHashUInt(hash, instance.isQueuedForUpdate ? 1u : 0u);
+		hash = ReplayCheckpointLosHashUInt(hash, instance.isQueuedForTerraform ? 1u : 0u);
+	}
+
+	hash = ReplayCheckpointLosHashVectorRaw(hash, freeIDs);
+
+	std::vector<std::pair<int, std::vector<int>>> hashEntries;
+	hashEntries.reserve(instanceHashes.size());
+	for (const auto& [hashNum, hashInstances]: instanceHashes) {
+		std::vector<int> instanceIds;
+		instanceIds.reserve(hashInstances.size());
+		for (const SLosInstance* instance: hashInstances)
+			instanceIds.push_back((instance != nullptr) ? instance->id : -1);
+
+		hashEntries.emplace_back(hashNum, std::move(instanceIds));
+	}
+
+	std::sort(hashEntries.begin(), hashEntries.end(), [](const auto& lhs, const auto& rhs) {
+		return (lhs.first < rhs.first);
+	});
+
+	hash = ReplayCheckpointLosHashUInt(hash, static_cast<uint32_t>(hashEntries.size()));
+	for (const auto& [hashNum, instanceIds]: hashEntries) {
+		hash = ReplayCheckpointLosHashInt(hash, hashNum);
+		hash = ReplayCheckpointLosHashVectorRaw(hash, instanceIds);
+	}
+
+	hash = ReplayCheckpointLosHashUInt(hash, GetReplayCheckpointQueueHash());
+	return hash;
 }
 
 
@@ -751,6 +1166,7 @@ void CLosHandler::Init()
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 	globalLOS.fill(false);
+	replayCheckpointLosStateLoaded = false;
 
 	baseRadarErrorSize = defBaseRadarErrorSize;
 	baseRadarErrorMult = defBaseRadarErrorMult;
@@ -808,11 +1224,21 @@ void CLosHandler::Kill()
 	);
 
 	losTypes.fill(nullptr);
+	replayCheckpointLosStateLoaded = false;
 }
 
 void CLosHandler::ResetLiveMapsForLoad()
 {
 	RECOIL_DETAILED_TRACY_ZONE;
+	if (replayCheckpointLosStateLoaded) {
+		replayCheckpointLosStateLoaded = false;
+		LOG("[ReplayCheckpoint] restored exact LOS live state for load from %u active units",
+			static_cast<unsigned int>(unitHandler.GetActiveUnits().size())
+		);
+		return;
+	}
+
+	const ReplayCheckpointLosMapSnapshot loadedMaps = CaptureReplayCheckpointLosMaps(losTypes);
 
 	for (ILosType* lt: losTypes) {
 		lt->Kill();
@@ -824,26 +1250,130 @@ void CLosHandler::ResetLiveMapsForLoad()
 	}
 
 	Update();
+	RestoreReplayCheckpointLosMaps(loadedMaps, losTypes);
 
-	LOG("[ReplayCheckpoint] reset LOS maps for load from %u active units",
+	LOG("[ReplayCheckpoint] reset LOS live instances for load from %u active units and restored checkpoint LOS maps",
 		static_cast<unsigned int>(unitHandler.GetActiveUnits().size())
 	);
 }
 
-void CLosHandler::SerializeReplayCheckpointLosMaps(creg::ISerializer* s)
+void CLosHandler::SerializeReplayCheckpointState(creg::ISerializer* s)
 {
 #ifdef USING_CREG
-	ReplayCheckpointLosMapSnapshot maps;
+	s->Serialize(ILosType::cacheFails);
+	s->Serialize(ILosType::cacheHits);
+	s->Serialize(ILosType::cacheRefs);
 
-	if (s->IsWriting())
-		maps = CaptureReplayCheckpointLosMaps(losTypes);
+	for (ILosType* losType: losTypes) {
+		assert(losType != nullptr);
+		losType->SerializeReplayCheckpoint(s);
+	}
 
-	std::unique_ptr<creg::IType> mapType = creg::DeduceType<decltype(maps)>::Get();
-	mapType->Serialize(s, &maps);
+	SerializeReplayCheckpointUnitLosLinks(s, losTypes);
 
 	if (!s->IsWriting())
-		RestoreReplayCheckpointLosMaps(maps, losTypes);
+		replayCheckpointLosStateLoaded = true;
 #endif
+}
+
+uint32_t CLosHandler::GetReplayCheckpointUnitLinkHash() const
+{
+	uint32_t hash = 0x7c01d005u;
+
+	const auto& activeUnits = unitHandler.GetActiveUnits();
+	hash = ReplayCheckpointLosHashUInt(hash, static_cast<uint32_t>(activeUnits.size()));
+
+	for (const CUnit* unit: activeUnits) {
+		hash = ReplayCheckpointLosHashInt(hash, (unit != nullptr) ? unit->id : -1);
+
+		if (unit == nullptr)
+			continue;
+
+		for (size_t typeIdx = 0; typeIdx < losTypes.size(); ++typeIdx) {
+			const SLosInstance* instance = unit->los[typeIdx];
+			hash = ReplayCheckpointLosHashUInt(hash, static_cast<uint32_t>(typeIdx));
+			hash = ReplayCheckpointLosHashInstancePtr(hash, instance);
+			hash = ReplayCheckpointLosHashInt(hash, (instance != nullptr) ? instance->hashNum : 0);
+			hash = ReplayCheckpointLosHashInt(hash, (instance != nullptr) ? instance->refCount : 0);
+		}
+	}
+
+	return hash;
+}
+
+uint32_t CLosHandler::GetReplayCheckpointStateHash() const
+{
+	uint32_t hash = 0x10c05a7eu;
+
+	hash = ReplayCheckpointLosHashUInt(hash, static_cast<uint32_t>(ILosType::cacheFails));
+	hash = ReplayCheckpointLosHashUInt(hash, static_cast<uint32_t>(ILosType::cacheHits));
+	hash = ReplayCheckpointLosHashUInt(hash, static_cast<uint32_t>(ILosType::cacheRefs));
+
+	for (const bool enabled: globalLOS)
+		hash = ReplayCheckpointLosHashUInt(hash, enabled ? 1u : 0u);
+
+	hash = ReplayCheckpointLosHashFloat(hash, baseRadarErrorSize);
+	hash = ReplayCheckpointLosHashFloat(hash, baseRadarErrorMult);
+	hash = ReplayCheckpointLosHashVectorRaw(hash, radarErrorSizes);
+
+	for (const ILosType* losType: losTypes) {
+		hash = ReplayCheckpointLosHashUInt(hash, losType != nullptr ? 1u : 0u);
+		if (losType != nullptr)
+			hash = ReplayCheckpointLosHashUInt(hash, losType->GetReplayCheckpointStateHash());
+	}
+
+	hash = ReplayCheckpointLosHashUInt(hash, GetReplayCheckpointUnitLinkHash());
+	return hash;
+}
+
+void CLosHandler::LogReplayCheckpointStateSignature(const char* label) const
+{
+	if (configHandler == nullptr)
+		return;
+
+	const int debugFrame = configHandler->GetInt("ReplayCheckpointDebugSignatureFrame");
+	if (debugFrame < 0 || gs == nullptr || gs->frameNum != debugFrame)
+		return;
+
+	uint32_t mapHash = 0x6c05f00du;
+	uint32_t queueHash = 0x70510f1fu;
+	unsigned int instanceCount = 0;
+	unsigned int freeIDCount = 0;
+	unsigned int delayedDeleteCount = 0;
+	unsigned int delayedTerraCount = 0;
+	unsigned int losUpdateCount = 0;
+	unsigned int losCacheCount = 0;
+
+	for (const ILosType* losType: losTypes) {
+		if (losType == nullptr)
+			continue;
+
+		mapHash = ReplayCheckpointLosHashUInt(mapHash, losType->GetReplayCheckpointMapHash());
+		queueHash = ReplayCheckpointLosHashUInt(queueHash, losType->GetReplayCheckpointQueueHash());
+		instanceCount += static_cast<unsigned int>(losType->instances.size());
+		freeIDCount += static_cast<unsigned int>(losType->freeIDs.size());
+		delayedDeleteCount += static_cast<unsigned int>(losType->GetReplayCheckpointDelayedDeleteCount());
+		delayedTerraCount += static_cast<unsigned int>(losType->GetReplayCheckpointDelayedTerraCount());
+		losUpdateCount += static_cast<unsigned int>(losType->GetReplayCheckpointLosUpdateCount());
+		losCacheCount += static_cast<unsigned int>(losType->GetReplayCheckpointLosCacheCount());
+	}
+
+	LOG("[ReplayCheckpoint][los-sig] %s frame=%d sync=%08x hash=%08x mapHash=%08x queueHash=%08x unitLinkHash=%08x instances=%u freeIDs=%u delayedDelete=%u delayedTerra=%u losUpdate=%u losCache=%u loaded=%u",
+		label,
+		gs->frameNum,
+		CSyncChecker::GetChecksum(),
+		GetReplayCheckpointStateHash(),
+		mapHash,
+		queueHash,
+		GetReplayCheckpointUnitLinkHash(),
+		instanceCount,
+		freeIDCount,
+		delayedDeleteCount,
+		delayedTerraCount,
+		losUpdateCount,
+		losCacheCount,
+		replayCheckpointLosStateLoaded ? 1u : 0u
+	);
 }
 
 

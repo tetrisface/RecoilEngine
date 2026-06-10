@@ -39,8 +39,6 @@ CR_REG_METADATA(CCobEngine::SleepingThread, (
 ))
 
 static const char* const numCobThreadsPlot = "CobThreads";
-static constexpr int REPLAY_CHECKPOINT_DEBUG_COB_UNIT_ID = 15919;
-
 static bool ReplayCheckpointDebugCobFrame()
 {
 	return (gs != nullptr && configHandler != nullptr && gs->frameNum == configHandler->GetInt("ReplayCheckpointDebugSignatureFrame"));
@@ -56,7 +54,8 @@ static int ReplayCheckpointCobOwnerID(const CCobThread* thread)
 
 static bool ReplayCheckpointShouldLogCobThread(const CCobThread* thread)
 {
-	return (ReplayCheckpointCobOwnerID(thread) == REPLAY_CHECKPOINT_DEBUG_COB_UNIT_ID);
+	const int debugUnitID = configHandler->GetInt("ReplayCheckpointDebugCobUnitID");
+	return (debugUnitID == -1 || ReplayCheckpointCobOwnerID(thread) == debugUnitID);
 }
 
 static void LogReplayCheckpointCobThread(const char* phase, const CCobThread* thread, int currentTime)

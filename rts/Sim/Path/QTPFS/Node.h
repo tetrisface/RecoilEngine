@@ -17,6 +17,10 @@
 #include "System/float3.h"
 #include "System/Rectangle.h"
 
+namespace creg {
+	class ISerializer;
+}
+
 #ifndef QTPFS_VIRTUAL_NODE_FUNCTIONS
 #define QTNode INode
 #endif
@@ -86,6 +90,7 @@ namespace QTPFS {
 		void PreTesselate(NodeLayer& nl, const SRectangle& r, SRectangle& ur, unsigned int depth, const UpdateThreadData* threadData);
 		void Tesselate(NodeLayer& nl, const SRectangle& r, unsigned int depth, const UpdateThreadData* threadData);
 		void Serialize(nowide::fstream& fStream, NodeLayer& nodeLayer, unsigned int* streamSize, unsigned int depth, bool readMode);
+		void SerializeReplayCheckpoint(creg::ISerializer* s);
 
 		bool IsLeaf() const { return (childBaseIndex == -1u); }
 		bool CanSplit(unsigned int depth, bool forced) const;
@@ -299,4 +304,3 @@ namespace QTPFS {
 }
 
 #endif
-

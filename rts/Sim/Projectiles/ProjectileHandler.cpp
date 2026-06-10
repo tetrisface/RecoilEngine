@@ -11,6 +11,7 @@
 #include "Map/Ground.h"
 #include "Rendering/GlobalRendering.h"
 #include "Rendering/GroundFlash.h"
+#include "Rendering/Models/3DModelPiece.hpp"
 #include "Sim/Features/Feature.h"
 #include "Sim/Features/FeatureDef.h"
 #include "Sim/Misc/CollisionHandler.h"
@@ -223,9 +224,90 @@ static uint32_t ReplayCheckpointProjectileHashFloat4(uint32_t hash, const float4
 	return hash;
 }
 
+static uint32_t ReplayCheckpointProjectileHashMatrix(uint32_t hash, const CMatrix44f& value)
+{
+	for (int i = 0; i < 16; ++i) {
+		hash = ReplayCheckpointProjectileHashFloat(hash, value[i]);
+	}
+
+	return hash;
+}
+
+static uint32_t ReplayCheckpointProjectileHashTransform(uint32_t hash, const Transform& value)
+{
+	hash = ReplayCheckpointProjectileHashFloat(hash, value.r.x);
+	hash = ReplayCheckpointProjectileHashFloat(hash, value.r.y);
+	hash = ReplayCheckpointProjectileHashFloat(hash, value.r.z);
+	hash = ReplayCheckpointProjectileHashFloat(hash, value.r.r);
+	hash = ReplayCheckpointProjectileHashFloat3(hash, value.t);
+	hash = ReplayCheckpointProjectileHashFloat(hash, value.s);
+	return hash;
+}
+
+static uint32_t ReplayCheckpointProjectileHashCollisionVolume(uint32_t hash, const CollisionVolume* volume)
+{
+	if (volume == nullptr)
+		return ReplayCheckpointProjectileHashInt(hash, -1);
+
+	hash = ReplayCheckpointProjectileHashInt(hash, volume->GetVolumeType());
+	hash = ReplayCheckpointProjectileHashInt(hash, volume->GetPrimaryAxis());
+	hash = ReplayCheckpointProjectileHashInt(hash, static_cast<int>(volume->IgnoreHits()));
+	hash = ReplayCheckpointProjectileHashInt(hash, static_cast<int>(volume->UseContHitTest()));
+	hash = ReplayCheckpointProjectileHashInt(hash, static_cast<int>(volume->DefaultToPieceTree()));
+	hash = ReplayCheckpointProjectileHashInt(hash, static_cast<int>(volume->DefaultToFootPrint()));
+	hash = ReplayCheckpointProjectileHashFloat3(hash, volume->GetScales());
+	hash = ReplayCheckpointProjectileHashFloat3(hash, volume->GetOffsets());
+	hash = ReplayCheckpointProjectileHashFloat(hash, volume->GetBoundingRadius());
+	return hash;
+}
+
+static uint32_t ReplayCheckpointProjectileHashLocalModelPiece(uint32_t hash, const LocalModelPiece& piece, bool resolved)
+{
+	hash = ReplayCheckpointProjectileHashInt(hash, piece.GetLModelPieceIndex());
+	hash = ReplayCheckpointProjectileHashInt(hash, piece.GetScriptPieceIndex());
+	hash = ReplayCheckpointProjectileHashInt(hash, static_cast<int>(piece.GetScriptVisible()));
+	hash = ReplayCheckpointProjectileHashInt(hash, static_cast<int>(piece.GetDirty()));
+	hash = ReplayCheckpointProjectileHashInt(hash, static_cast<int>(piece.blockScriptAnims));
+	hash = ReplayCheckpointProjectileHashFloat3(hash, piece.GetPosition());
+	hash = ReplayCheckpointProjectileHashFloat3(hash, piece.GetRotation());
+	hash = ReplayCheckpointProjectileHashFloat(hash, piece.GetScaling());
+	hash = ReplayCheckpointProjectileHashFloat3(hash, piece.GetDirection());
+	hash = ReplayCheckpointProjectileHashTransform(hash, piece.GetModelSpaceTransformRaw());
+	hash = ReplayCheckpointProjectileHashCollisionVolume(hash, piece.GetCollisionVolume());
+
+	if (resolved) {
+		hash = ReplayCheckpointProjectileHashTransform(hash, piece.GetModelSpaceTransform());
+		hash = ReplayCheckpointProjectileHashMatrix(hash, piece.GetModelSpaceMatrix());
+	}
+
+	return hash;
+}
+
+static uint32_t ReplayCheckpointProjectileHashLocalModel(const CUnit* unit, bool resolved)
+{
+	uint32_t hash = 0x514c4d31u;
+
+	if (unit == nullptr)
+		return hash;
+
+	hash = ReplayCheckpointProjectileHashInt(hash, static_cast<int>(unit->localModel.pieces.size()));
+	hash = ReplayCheckpointProjectileHashInt(hash, static_cast<int>(unit->localModel.GetBoundariesNeedsRecalc()));
+	hash = ReplayCheckpointProjectileHashCollisionVolume(hash, unit->localModel.GetBoundingVolume());
+
+	for (const LocalModelPiece& piece: unit->localModel.pieces) {
+		hash = ReplayCheckpointProjectileHashLocalModelPiece(hash, piece, resolved);
+	}
+
+	return hash;
+}
+
 static void ReplayCheckpointLogProjectileEvent(const char* label, const CProjectile* p)
 {
 	if (!ReplayCheckpointDebugProjectileFrame() || p == nullptr || !p->synced)
+		return;
+
+	const int debugProjectileID = configHandler->GetInt("ReplayCheckpointDebugDamageProjectileID");
+	if (debugProjectileID >= 0 && p->id != debugProjectileID)
 		return;
 
 	const auto* wp = dynamic_cast<const CWeaponProjectile*>(p);
@@ -263,12 +345,83 @@ static void ReplayCheckpointLogProjectileEvent(const char* label, const CProject
 		(wp != nullptr) ? wp->HasScheduledBounce() : false);
 }
 
-static constexpr int REPLAY_CHECKPOINT_DEBUG_PROJECTILE_COLLISION_ID = 13147;
-static constexpr int REPLAY_CHECKPOINT_DEBUG_PROJECTILE_COLLISION_UNIT_ID = 15919;
-
 static bool ReplayCheckpointShouldLogProjectileCollisionTrace(const CProjectile* p)
 {
-	return (ReplayCheckpointDebugProjectileFrame() && p != nullptr && p->synced && p->id == REPLAY_CHECKPOINT_DEBUG_PROJECTILE_COLLISION_ID);
+	if (!ReplayCheckpointDebugProjectileFrame() || p == nullptr || !p->synced)
+		return false;
+
+	const int debugProjectileID = configHandler->GetInt("ReplayCheckpointDebugDamageProjectileID");
+	return (debugProjectileID >= 0 && p->id == debugProjectileID);
+}
+
+static void ReplayCheckpointLogProjectileLocalModelState(const char* label, const CProjectile* p, const CUnit* unit, bool resolved)
+{
+	if (!ReplayCheckpointShouldLogProjectileCollisionTrace(p) || unit == nullptr)
+		return;
+
+	const int debugUnitID = configHandler->GetInt("ReplayCheckpointDebugTargetQueryUnit");
+	if (debugUnitID < 0 || unit->id != debugUnitID)
+		return;
+
+	const CollisionVolume* boundingVolume = unit->localModel.GetBoundingVolume();
+	const uint32_t hash = ReplayCheckpointProjectileHashLocalModel(unit, resolved);
+
+	LOG("[ReplayCheckpoint][unit-localmodel] %s frame=%d projectile=%d unit=%d pieces=%u resolved=%d hash=%08x boundariesNeed=%d bvType=%d bvAxis=%d bvScales=<%f,%f,%f> bvOffsets=<%f,%f,%f> bvRadius=%f",
+		label,
+		gs->frameNum,
+		p->id,
+		unit->id,
+		static_cast<unsigned int>(unit->localModel.pieces.size()),
+		static_cast<int>(resolved),
+		hash,
+		static_cast<int>(unit->localModel.GetBoundariesNeedsRecalc()),
+		boundingVolume->GetVolumeType(),
+		boundingVolume->GetPrimaryAxis(),
+		boundingVolume->GetScales().x, boundingVolume->GetScales().y, boundingVolume->GetScales().z,
+		boundingVolume->GetOffsets().x, boundingVolume->GetOffsets().y, boundingVolume->GetOffsets().z,
+		boundingVolume->GetBoundingRadius()
+	);
+
+	for (const LocalModelPiece& piece: unit->localModel.pieces) {
+		const CollisionVolume* pieceVolume = piece.GetCollisionVolume();
+		if (!piece.GetScriptVisible() || pieceVolume->IgnoreHits())
+			continue;
+
+		const Transform& rawTra = piece.GetModelSpaceTransformRaw();
+		const Transform& modelTra = resolved ? piece.GetModelSpaceTransform() : rawTra;
+		const CMatrix44f* modelMat = resolved ? &piece.GetModelSpaceMatrix() : nullptr;
+		const char* pieceName = (piece.original != nullptr) ? piece.original->name.c_str() : "<null>";
+
+		LOG("[ReplayCheckpoint][unit-localmodel-piece] %s frame=%d projectile=%d unit=%d piece=%d scriptPiece=%d name=%s visible=%d dirty=%d block=%d pos=<%f,%f,%f> rot=<%f,%f,%f> scale=%f rawT=<%f,%f,%f> rawQ=<%f,%f,%f,%f> rawS=%f modelT=<%f,%f,%f> modelQ=<%f,%f,%f,%f> modelS=%f matT=<%f,%f,%f> cvType=%d cvAxis=%d cvScales=<%f,%f,%f> cvOffsets=<%f,%f,%f> cvRadius=%f",
+			label,
+			gs->frameNum,
+			p->id,
+			unit->id,
+			piece.GetLModelPieceIndex(),
+			piece.GetScriptPieceIndex(),
+			pieceName,
+			static_cast<int>(piece.GetScriptVisible()),
+			static_cast<int>(piece.GetDirty()),
+			static_cast<int>(piece.blockScriptAnims),
+			piece.GetPosition().x, piece.GetPosition().y, piece.GetPosition().z,
+			piece.GetRotation().x, piece.GetRotation().y, piece.GetRotation().z,
+			piece.GetScaling(),
+			rawTra.t.x, rawTra.t.y, rawTra.t.z,
+			rawTra.r.x, rawTra.r.y, rawTra.r.z, rawTra.r.r,
+			rawTra.s,
+			modelTra.t.x, modelTra.t.y, modelTra.t.z,
+			modelTra.r.x, modelTra.r.y, modelTra.r.z, modelTra.r.r,
+			modelTra.s,
+			(modelMat != nullptr) ? (*modelMat)[12] : 0.0f,
+			(modelMat != nullptr) ? (*modelMat)[13] : 0.0f,
+			(modelMat != nullptr) ? (*modelMat)[14] : 0.0f,
+			pieceVolume->GetVolumeType(),
+			pieceVolume->GetPrimaryAxis(),
+			pieceVolume->GetScales().x, pieceVolume->GetScales().y, pieceVolume->GetScales().z,
+			pieceVolume->GetOffsets().x, pieceVolume->GetOffsets().y, pieceVolume->GetOffsets().z,
+			pieceVolume->GetBoundingRadius()
+		);
+	}
 }
 
 static void ReplayCheckpointLogProjectileSignature(const char* label)
@@ -625,6 +778,9 @@ void CProjectileHandler::CheckUnitCollisions(
 	CollisionQuery cq;
 	const bool replayCheckpointTrace = ReplayCheckpointShouldLogProjectileCollisionTrace(p);
 	const auto* wp = replayCheckpointTrace ? dynamic_cast<const CWeaponProjectile*>(p) : nullptr;
+	const int replayCheckpointDebugUnitID = ReplayCheckpointDebugProjectileFrame()
+		? configHandler->GetInt("ReplayCheckpointDebugTargetQueryUnit")
+		: -1;
 
 	for (size_t unitIndex = 0; unitIndex < tempUnits.size(); ++unitIndex) {
 		CUnit* unit = tempUnits[unitIndex];
@@ -686,8 +842,10 @@ void CProjectileHandler::CheckUnitCollisions(
 			continue;
 		}
 
+		ReplayCheckpointLogProjectileLocalModelState("pre-detect", p, unit, false);
 		hit = CCollisionHandler::DetectHit(unit, unit->GetTransformMatrix(true), ppos0, ppos1, &cq);
-		if (replayCheckpointTrace || unit->id == REPLAY_CHECKPOINT_DEBUG_PROJECTILE_COLLISION_UNIT_ID) {
+		ReplayCheckpointLogProjectileLocalModelState("post-detect", p, unit, true);
+		if (replayCheckpointTrace || unit->id == replayCheckpointDebugUnitID) {
 			LOG("[ReplayCheckpoint][proj-collision] candidate frame=%d projectile=%d index=%u unit=%d owner=0 collidable=1 flags=1 hit=%d target=%d pos=<%f,%f,%f> p0=<%f,%f,%f> p1=<%f,%f,%f>%s",
 				gs->frameNum,
 				p->id,
@@ -703,9 +861,11 @@ void CProjectileHandler::CheckUnitCollisions(
 		}
 
 		if (hit) {
-			if (replayCheckpointTrace || unit->id == REPLAY_CHECKPOINT_DEBUG_PROJECTILE_COLLISION_UNIT_ID) {
+			if (replayCheckpointTrace || unit->id == replayCheckpointDebugUnitID) {
 				const float3 hitPos = cq.GetHitPos();
-				LOG("[ReplayCheckpoint][proj-collision] hit frame=%d projectile=%d index=%u unit=%d inside=%d ingress=%d egress=%d hitPiece=%d hitPos=<%f,%f,%f>",
+				const LocalModelPiece* hitPiece = cq.GetHitPiece();
+				const char* hitPieceName = (hitPiece != nullptr && hitPiece->original != nullptr) ? hitPiece->original->name.c_str() : "<none>";
+				LOG("[ReplayCheckpoint][proj-collision] hit frame=%d projectile=%d index=%u unit=%d inside=%d ingress=%d egress=%d hitPiece=%d hitPieceModel=%d hitPieceScript=%d hitPieceName=%s hitPos=<%f,%f,%f>",
 					gs->frameNum,
 					p->id,
 					static_cast<unsigned int>(unitIndex),
@@ -713,7 +873,10 @@ void CProjectileHandler::CheckUnitCollisions(
 					static_cast<int>(cq.InsideHit()),
 					static_cast<int>(cq.IngressHit()),
 					static_cast<int>(cq.EgressHit()),
-					static_cast<int>(cq.GetHitPiece() != nullptr),
+					static_cast<int>(hitPiece != nullptr),
+					(hitPiece != nullptr) ? hitPiece->GetLModelPieceIndex() : -1,
+					(hitPiece != nullptr) ? hitPiece->GetScriptPieceIndex() : -1,
+					hitPieceName,
 					hitPos.x, hitPos.y, hitPos.z
 				);
 			}

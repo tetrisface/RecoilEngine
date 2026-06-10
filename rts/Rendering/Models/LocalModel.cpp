@@ -57,6 +57,9 @@ void LocalModel::SetModel(const S3DModel* model, bool initialize)
 	if (!initialize) {
 		assert(pieces.size() == model->numPieces);
 
+		const CollisionVolume savedBoundingVolume = boundingVolume;
+		const bool savedNeedsBoundariesRecalc = needsBoundariesRecalc;
+
 		// PostLoad; only update the pieces
 		for (size_t n = 0; n < pieces.size(); n++) {
 			S3DModelPiece* omp = model->GetPiece(n);
@@ -65,7 +68,8 @@ void LocalModel::SetModel(const S3DModel* model, bool initialize)
 		}
 
 		pieces[0].UpdateChildTransformRec(true);
-		UpdateBoundingVolume();
+		boundingVolume = savedBoundingVolume;
+		needsBoundariesRecalc = savedNeedsBoundariesRecalc;
 		return;
 	}
 

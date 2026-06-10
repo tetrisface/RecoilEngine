@@ -342,6 +342,7 @@ namespace QTPFS {
 		}
 
 		void SetPathType(int newPathType) { assert(pathType < moveDefHandler.GetNumMoveDefs()); pathType = newPathType; }
+		void RestorePathTypeForReplayCheckpoint(int newPathType) { pathType = newPathType; }
 		int GetPathType() const { return pathType; }
 
 		std::vector<PathNodeData>& GetNodeList() { return nodes; };

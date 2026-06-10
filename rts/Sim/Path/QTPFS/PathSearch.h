@@ -122,8 +122,15 @@ namespace QTPFS {
 
 		const PathHashType GetHash() const { return pathSearchHash; };
 		const PathHashType GetPartialSearchHash() const { return pathPartialSearchHash; };
+		unsigned int GetSearchType() const { return searchType; }
 
 		bool PathWasFound() const { return haveFullPath | havePartPath; }
+		bool HasFullPathResultForReplayCheckpoint() const { return haveFullPath; }
+		bool HasPartialPathResultForReplayCheckpoint() const { return havePartPath; }
+		void RestoreReplayCheckpointResultFlags(bool fullPath, bool partialPath) {
+			haveFullPath = fullPath;
+			havePartPath = partialPath;
+		}
 
 		void SetPathType(int newPathType) { pathType = newPathType; }
 		int GetPathType() const { return pathType; }
@@ -302,4 +309,3 @@ public:
 }
 
 #endif
-

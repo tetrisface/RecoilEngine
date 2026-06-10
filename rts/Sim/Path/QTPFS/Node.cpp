@@ -20,6 +20,9 @@
 #include "Sim/MoveTypes/MoveMath/MoveMath.h"
 
 #include "System/Misc/TracyDefs.h"
+#ifdef USING_CREG
+#include "System/creg/ISerializer.h"
+#endif
 
 unsigned int QTPFS::QTNode::MIN_SIZE_X;
 unsigned int QTPFS::QTNode::MIN_SIZE_Z;
@@ -715,6 +718,27 @@ void QTPFS::QTNode::Serialize(nowide::fstream& fStream, NodeLayer& nodeLayer, un
 	}
 }
 
+#ifdef USING_CREG
+void QTPFS::QTNode::SerializeReplayCheckpoint(creg::ISerializer* s)
+{
+	s->Serialize(nodeNumber);
+	s->Serialize(index);
+	s->Serialize(&points, sizeof(points));
+	s->Serialize(moveCostAvg);
+	s->Serialize(childBaseIndex);
+
+	uint32_t neighbourCount = static_cast<uint32_t>(neighbours.size());
+	s->Serialize(neighbourCount);
+	if (!s->IsWriting())
+		neighbours.resize(neighbourCount);
+
+	for (NeighbourPoints& neighbour: neighbours) {
+		s->Serialize(neighbour.nodeId);
+		s->Serialize(&neighbour.netpoints, sizeof(neighbour.netpoints));
+	}
+}
+#endif
+
 
 // this is *either* called from ::GetNeighbors when the conservative
 // update-scheme is enabled, *or* from PM::ExecQueuedNodeLayerUpdates
@@ -1015,4 +1039,3 @@ bool QTPFS::QTNode::UpdateNeighborCache(NodeLayer& nodeLayer, UpdateThreadData& 
 
 	return true;
 }
-

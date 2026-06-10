@@ -32,6 +32,7 @@ make_global_var(sources_engine_System_common
 		"${CMAKE_CURRENT_SOURCE_DIR}/LoadSave/LoadSaveHandler.cpp"
 		"${CMAKE_CURRENT_SOURCE_DIR}/LoadSave/LuaLoadSaveHandler.cpp"
 		"${CMAKE_CURRENT_SOURCE_DIR}/LoadSave/ReplayCheckpointHandler.cpp"
+		"${CMAKE_CURRENT_SOURCE_DIR}/LoadSave/ReplayCheckpointSavePlanner.cpp"
 		"${CMAKE_CURRENT_SOURCE_DIR}/LogOutput.cpp"
 		"${CMAKE_CURRENT_SOURCE_DIR}/Main.cpp"
 		"${CMAKE_CURRENT_SOURCE_DIR}/Math/SpringDampers.cpp"

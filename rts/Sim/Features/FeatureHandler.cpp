@@ -5,6 +5,7 @@
 #include "FeatureDef.h"
 #include "FeatureDefHandler.h"
 #include "FeatureMemPool.h"
+#include "FeatureUpdateQueuePolicy.h"
 #include "Map/Ground.h"
 #include "Map/ReadMap.h"
 #include "Sim/Ecs/Registry.h"
@@ -191,25 +192,16 @@ static bool FeatureNeedsUpdateAfterLoad(const CFeature* feature)
 	if (feature == nullptr)
 		return false;
 
-	if (feature->deleteMe)
-		return true;
+	FeatureUpdateQueuePolicy::FeatureState state;
+	state.deleteMe = feature->deleteMe;
+	state.moveControlEnabled = feature->moveCtrl.enabled;
+	state.hasVelocity = feature->speed.w != 0.0f;
+	state.hasSmokeOrFire = feature->smokeTime != 0 || feature->fireTime != 0;
+	state.geoThermal = feature->def != nullptr && feature->def->geoThermal;
+	state.onGround = feature->IsOnGround();
+	state.creationFrame = feature->creationFrame;
 
-	if (feature->moveCtrl.enabled)
-		return true;
-
-	if (feature->speed.w != 0.0f)
-		return true;
-
-	if (feature->smokeTime != 0 || feature->fireTime != 0)
-		return true;
-
-	if (feature->def != nullptr && feature->def->geoThermal)
-		return true;
-
-	if (gs != nullptr && feature->creationFrame == gs->frameNum)
-		return true;
-
-	return !feature->IsOnGround();
+	return FeatureUpdateQueuePolicy::NeedsUpdateAfterLoad(state, gs != nullptr ? gs->frameNum : -1);
 }
 
 void CFeatureHandler::RestoreUpdateQueueForLoad()

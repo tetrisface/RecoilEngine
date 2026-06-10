@@ -88,6 +88,7 @@ static uint32_t ReplayCheckpointUnitHandlerHashUnitMoveState(const CUnit* unit)
 	hash = ReplayCheckpointUnitHandlerHashFloat3(hash, unit->pos);
 	hash = ReplayCheckpointUnitHandlerHashFloat4(hash, unit->speed);
 	hash = ReplayCheckpointUnitHandlerHashInt(hash, unit->heading);
+	hash = ReplayCheckpointUnitHandlerHashBool(hash, unit->upright);
 	hash = ReplayCheckpointUnitHandlerHashUInt(hash, static_cast<uint32_t>(unit->physicalState));
 	hash = ReplayCheckpointUnitHandlerHashUInt(hash, static_cast<uint32_t>(unit->collidableState));
 	hash = ReplayCheckpointUnitHandlerHashFloat3(hash, unit->frontdir);
@@ -147,6 +148,7 @@ static void LogReplayCheckpointUnitHandlerSignature(
 		return;
 
 	const bool debugUnitDetails = (std::strcmp(label, "unit-update-begin") == 0);
+	const int debugUnitDetailID = configHandler->GetInt("ReplayCheckpointDebugTargetQueryUnit");
 	uint32_t unitHash = 0x13572468u;
 	for (const CUnit* unit: activeUnits) {
 		if (unit == nullptr)
@@ -158,7 +160,7 @@ static void LogReplayCheckpointUnitHandlerSignature(
 		const AMoveType* moveType = unit->moveType;
 		const CGroundMoveType* groundMoveType = (moveType != nullptr)? dynamic_cast<const CGroundMoveType*>(moveType): nullptr;
 
-		if (debugUnitDetails) {
+		if (debugUnitDetails && (debugUnitDetailID < 0 || unit->id == debugUnitDetailID)) {
 			const float3& goalPos = (moveType != nullptr)? moveType->goalPos: ZeroVector;
 			const float3& oldPos = (moveType != nullptr)? moveType->oldPos: ZeroVector;
 			const float3& oldSlowUpdatePos = (moveType != nullptr)? moveType->oldSlowUpdatePos: ZeroVector;
@@ -168,17 +170,26 @@ static void LogReplayCheckpointUnitHandlerSignature(
 			const float3& earlyCurrWayPoint = (groundMoveType != nullptr)? groundMoveType->GetEarlyCurrWayPoint(): ZeroVector;
 			const float3& earlyNextWayPoint = (groundMoveType != nullptr)? groundMoveType->GetEarlyNextWayPoint(): ZeroVector;
 
-			LOG("[ReplayCheckpoint][unit-detail] %s frame=%d unit=%d hash=%08x team=%d pos=<%.8g,%.8g,%.8g> speed=<%.8g,%.8g,%.8g,%.8g> heading=%d phys=%u coll=%u goal=<%.8g,%.8g,%.8g> old=<%.8g,%.8g,%.8g> oldSlow=<%.8g,%.8g,%.8g> oldColl=<%.8g,%.8g,%.8g> progress=%d useHeading=%u gmt=%u cwp=<%.8g,%.8g,%.8g> nwp=<%.8g,%.8g,%.8g> ecwp=<%.8g,%.8g,%.8g> enwp=<%.8g,%.8g,%.8g> wanted=%.8g current=%.8g delta=%.8g cdist=%.8g pdist=%.8g path=%u nextPath=%u rev=%u atGoal=%u atEnd=%u lastWp=%u raw=%u failed=%u arrived=%u",
+			LOG("[ReplayCheckpoint][unit-detail] %s frame=%d unit=%d hash=%08x team=%d health=%.8g maxHealth=%.8g healthPct=%d pos=<%.8g,%.8g,%.8g> speed=<%.8g,%.8g,%.8g,%.8g> heading=%d upright=%u onGround=%u inAir=%u phys=%u coll=%u front=<%.8g,%.8g,%.8g> up=<%.8g,%.8g,%.8g> right=<%.8g,%.8g,%.8g> goal=<%.8g,%.8g,%.8g> old=<%.8g,%.8g,%.8g> oldSlow=<%.8g,%.8g,%.8g> oldColl=<%.8g,%.8g,%.8g> progress=%d useHeading=%u gmt=%u cwp=<%.8g,%.8g,%.8g> nwp=<%.8g,%.8g,%.8g> ecwp=<%.8g,%.8g,%.8g> enwp=<%.8g,%.8g,%.8g> wanted=%.8g current=%.8g delta=%.8g cdist=%.8g pdist=%.8g path=%u nextPath=%u rev=%u atGoal=%u atEnd=%u lastWp=%u raw=%u failed=%u arrived=%u",
 				label,
 				gs->frameNum,
 				unit->id,
 				unitDetailHash,
 				unit->team,
+				unit->health,
+				unit->maxHealth,
+				static_cast<int>((unit->health / unit->maxHealth) * 100.0f),
 				unit->pos.x, unit->pos.y, unit->pos.z,
 				unit->speed.x, unit->speed.y, unit->speed.z, unit->speed.w,
 				static_cast<int>(unit->heading),
+				unit->upright ? 1u : 0u,
+				unit->IsOnGround() ? 1u : 0u,
+				unit->IsInAir() ? 1u : 0u,
 				static_cast<unsigned int>(unit->physicalState),
 				static_cast<unsigned int>(unit->collidableState),
+				static_cast<float>(unit->frontdir.x), static_cast<float>(unit->frontdir.y), static_cast<float>(unit->frontdir.z),
+				static_cast<float>(unit->updir.x), static_cast<float>(unit->updir.y), static_cast<float>(unit->updir.z),
+				static_cast<float>(unit->rightdir.x), static_cast<float>(unit->rightdir.y), static_cast<float>(unit->rightdir.z),
 				goalPos.x, goalPos.y, goalPos.z,
 				oldPos.x, oldPos.y, oldPos.z,
 				oldSlowUpdatePos.x, oldSlowUpdatePos.y, oldSlowUpdatePos.z,

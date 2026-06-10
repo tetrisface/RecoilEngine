@@ -123,7 +123,7 @@ void CGameStateCollector::Serialize(creg::ISerializer* s)
 	s->SerializeObjectInstance(&CNullUnitScript::value, CNullUnitScript::value.GetClass());
 	s->SerializeObjectInstance(&featureHandler, featureHandler.GetClass());
 	s->SerializeObjectInstance(losHandler, losHandler->GetClass());
-	losHandler->SerializeReplayCheckpointLosMaps(s);
+	losHandler->SerializeReplayCheckpointState(s);
 	s->SerializeObjectInstance(&interceptHandler, interceptHandler.GetClass());
 	s->SerializeObjectInstance(CCategoryHandler::Instance(), CCategoryHandler::Instance()->GetClass());
 	s->SerializeObjectInstance(&groundBlockingObjectMap, groundBlockingObjectMap.GetClass());

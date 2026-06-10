@@ -6,7 +6,6 @@
 
 #include "xsimd/xsimd.hpp"
 #include "ReadMap.h"
-#include "MapDamage.h"
 #include "MapInfo.h"
 #include "MetalMap.h"
 #include "Rendering/Env/MapRendering.h"
@@ -30,6 +29,41 @@
 #include "System/Misc/TracyDefs.h"
 
 static constexpr size_t MAX_UHM_RECTS_PER_FRAME = 128;
+
+template<typename T>
+static void SerializeReplayCheckpointVectorRaw(creg::ISerializer* s, std::vector<T>& values)
+{
+	uint32_t size = static_cast<uint32_t>(values.size());
+	s->Serialize(&size, sizeof(size));
+
+	if (!s->IsWriting())
+		values.resize(size);
+
+	if (!values.empty())
+		s->Serialize(values.data(), values.size() * sizeof(T));
+}
+
+static void SerializeReplayCheckpointFloat3Vector(creg::ISerializer* s, std::vector<float3>& values)
+{
+	uint32_t size = static_cast<uint32_t>(values.size());
+	s->Serialize(&size, sizeof(size));
+
+	if (!s->IsWriting())
+		values.resize(size);
+
+	for (float3& value: values) {
+		float x = value.x;
+		float y = value.y;
+		float z = value.z;
+
+		s->Serialize(&x, sizeof(x));
+		s->Serialize(&y, sizeof(y));
+		s->Serialize(&z, sizeof(z));
+
+		if (!s->IsWriting())
+			value = float3{x, y, z};
+	}
+}
 
 //////////////////////////////////////////////////////////////////////
 // Construction/Destruction
@@ -188,6 +222,7 @@ void CReadMap::Serialize(creg::ISerializer* s)
 	RECOIL_DETAILED_TRACY_ZONE;
 	SerializeMapChangesBeforeMatch(s);
 	SerializeMapChangesDuringMatch(s);
+	SerializeDerivedHeightMapState(s);
 	SerializeTypeMap(s);
 	s->SerializeObjectInstance(&metalMap, metalMap.GetClass());
 }
@@ -225,6 +260,27 @@ void CReadMap::SerializeMapChanges(creg::ISerializer* s, const float* refHeightM
 			ichms[i] = height ^ iochms[i];
 		}
 	}
+}
+
+void CReadMap::SerializeDerivedHeightMapState(creg::ISerializer* s)
+{
+	RECOIL_DETAILED_TRACY_ZONE;
+
+	SerializeReplayCheckpointVectorRaw(s, centerHeightMap);
+	for (std::vector<float>& mipHeightMap: mipCenterHeightMaps) {
+		SerializeReplayCheckpointVectorRaw(s, mipHeightMap);
+	}
+	SerializeReplayCheckpointVectorRaw(s, maxHeightMap);
+
+	SerializeReplayCheckpointFloat3Vector(s, faceNormalsSynced);
+	SerializeReplayCheckpointFloat3Vector(s, faceNormalsUnsynced);
+	SerializeReplayCheckpointFloat3Vector(s, centerNormalsSynced);
+	SerializeReplayCheckpointFloat3Vector(s, centerNormalsUnsynced);
+	SerializeReplayCheckpointFloat3Vector(s, centerNormals2D);
+
+	SerializeReplayCheckpointVectorRaw(s, slopeMap);
+	SerializeReplayCheckpointVectorRaw(s, syncedHeightMapDigests);
+	SerializeReplayCheckpointVectorRaw(s, unsyncedHeightMapDigests);
 }
 
 void CReadMap::SerializeTypeMap(creg::ISerializer* s)
@@ -282,15 +338,14 @@ void CReadMap::PostLoad()
 	mipPointerHeightMaps[0] = &centerHeightMap[0];
 
 	for (int i = 1; i < numHeightMipMaps; i++) {
-		mipCenterHeightMaps[i - 1].clear();
-		mipCenterHeightMaps[i - 1].resize((mapDims.mapx >> i) * (mapDims.mapy >> i));
+		const size_t expectedSize = (mapDims.mapx >> i) * (mapDims.mapy >> i);
+		if (mipCenterHeightMaps[i - 1].size() != expectedSize)
+			mipCenterHeightMaps[i - 1].resize(expectedSize);
 
 		mipPointerHeightMaps[i] = &mipCenterHeightMaps[i - 1][0];
 	}
 
 	hmUpdated = true;
-
-	mapDamage->RecalcArea(0, mapDims.mapx, 0, mapDims.mapy);
 }
 #endif //USING_CREG
 

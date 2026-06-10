@@ -20,6 +20,10 @@
 
 #include "Registry.h"
 
+namespace creg {
+	class ISerializer;
+}
+
 struct MoveDef;
 
 namespace QTPFS {
@@ -108,6 +112,7 @@ namespace QTPFS {
 
 		void Init(unsigned int layerNum);
 		void Clear();
+		void SerializeReplayCheckpoint(creg::ISerializer* s);
 
 		bool Update(UpdateThreadData& threadData);
 

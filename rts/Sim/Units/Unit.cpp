@@ -76,8 +76,8 @@
 
 GlobalUnitParams globalUnitParams;
 
-static constexpr int REPLAY_CHECKPOINT_DEBUG_DAMAGE_UNIT_ID = 15919;
-static constexpr int REPLAY_CHECKPOINT_DEBUG_DAMAGE_PROJECTILE_ID = 13147;
+CONFIG(int, ReplayCheckpointDebugDamageUnitID).defaultValue(-1).description("Unit ID for replay checkpoint damage diagnostics");
+CONFIG(int, ReplayCheckpointDebugDamageProjectileID).defaultValue(-1).description("Projectile ID for replay checkpoint damage diagnostics");
 
 static bool ReplayCheckpointDebugDamageFrame()
 {
@@ -86,10 +86,13 @@ static bool ReplayCheckpointDebugDamageFrame()
 
 static bool ReplayCheckpointShouldLogDamage(const CUnit* unit, int projectileID)
 {
+	const int debugUnitID = configHandler->GetInt("ReplayCheckpointDebugDamageUnitID");
+	const int debugProjectileID = configHandler->GetInt("ReplayCheckpointDebugDamageProjectileID");
+
 	return (
 		ReplayCheckpointDebugDamageFrame() &&
 		unit != nullptr &&
-		(unit->id == REPLAY_CHECKPOINT_DEBUG_DAMAGE_UNIT_ID || projectileID == REPLAY_CHECKPOINT_DEBUG_DAMAGE_PROJECTILE_ID)
+		((debugUnitID >= 0 && unit->id == debugUnitID) || (debugProjectileID >= 0 && projectileID == debugProjectileID))
 	);
 }
 
@@ -1392,13 +1395,15 @@ void CUnit::DoDamage(
 	const bool replayCheckpointDebugDamage = ReplayCheckpointShouldLogDamage(this, projectileID);
 
 	if (replayCheckpointDebugDamage) {
-		LOG("[ReplayCheckpoint][unit-damage] enter frame=%d unit=%d projectile=%d weaponDef=%d attacker=%d health=%f base=%f impulse=<%f,%f,%f>",
+		LOG("[ReplayCheckpoint][unit-damage] enter frame=%d unit=%d projectile=%d weaponDef=%d attacker=%d health=%f maxHealth=%f healthPct=%d base=%f impulse=<%f,%f,%f>",
 			gs->frameNum,
 			id,
 			projectileID,
 			weaponDefID,
 			(attacker != nullptr) ? attacker->id : -1,
 			health,
+			maxHealth,
+			static_cast<int>((health / maxHealth) * 100.0f),
 			baseDamage,
 			impulse.x, impulse.y, impulse.z
 		);
@@ -1448,12 +1453,14 @@ void CUnit::DoDamage(
 	ApplyImpulse((impulse * impulseMult) / mass);
 	ApplyDamage(attacker, damages, baseDamage, experienceMod);
 	if (replayCheckpointDebugDamage) {
-		LOG("[ReplayCheckpoint][unit-damage] after-apply frame=%d unit=%d projectile=%d weaponDef=%d health=%f base=%f",
+		LOG("[ReplayCheckpoint][unit-damage] after-apply frame=%d unit=%d projectile=%d weaponDef=%d health=%f maxHealth=%f healthPct=%d base=%f",
 			gs->frameNum,
 			id,
 			projectileID,
 			weaponDefID,
 			health,
+			maxHealth,
+			static_cast<int>((health / maxHealth) * 100.0f),
 			baseDamage
 		);
 	}

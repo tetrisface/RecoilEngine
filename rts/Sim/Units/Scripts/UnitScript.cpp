@@ -47,10 +47,22 @@
 #include "System/FastMath.h"
 #include "System/SpringMath.h"
 #include "System/Log/ILog.h"
+#include "System/SpringHash.h"
 #include "System/StringUtil.h"
 #include "System/Sound/ISoundChannels.h"
 
 #include "System/Misc/TracyDefs.h"
+
+static bool ReplayCheckpointDebugUnitScriptFrame()
+{
+	return (gs != nullptr && configHandler != nullptr && gs->frameNum == configHandler->GetInt("ReplayCheckpointDebugSignatureFrame"));
+}
+
+static bool ReplayCheckpointShouldLogScriptUnit(const CUnit* unit)
+{
+	const int debugUnitID = configHandler->GetInt("ReplayCheckpointDebugCobUnitID");
+	return (ReplayCheckpointDebugUnitScriptFrame() && unit != nullptr && (debugUnitID == -1 || unit->id == debugUnitID));
+}
 
 #endif
 
@@ -84,17 +96,47 @@ CR_REG_METADATA_SUB(CUnitScript, AnimInfo,(
 	CR_MEMBER(hasWaiting)
 ))
 
-static constexpr int REPLAY_CHECKPOINT_DEBUG_UNIT_SCRIPT_ANIM_UNIT_ID = 15919;
+uint32_t CUnitScript::HashAnimInfo(const AnimInfo& ai, uint32_t seed)
+{
+	const int animType = static_cast<int>(ai.animType);
+	const uint8_t done = ai.done ? 1u : 0u;
+	const uint8_t hasWaiting = ai.hasWaiting ? 1u : 0u;
+
+	seed = spring::LiteHash(animType, seed);
+	seed = spring::LiteHash(ai.axis, seed);
+	seed = spring::LiteHash(ai.piece, seed);
+	seed = spring::LiteHash(ai.speed, seed);
+	seed = spring::LiteHash(ai.dest, seed);
+	seed = spring::LiteHash(ai.accel, seed);
+	seed = spring::LiteHash(done, seed);
+	seed = spring::LiteHash(hasWaiting, seed);
+
+	return seed;
+}
+
+uint32_t CUnitScript::HashAnimContainer(const AnimContainerType& anims)
+{
+	uint32_t hash = 0;
+
+	for (const auto& ai: anims) {
+		hash = HashAnimInfo(ai, hash);
+	}
+
+	return hash;
+}
 
 static bool ReplayCheckpointDebugUnitScriptAnimFrame(const CUnit* unit)
 {
-	return (
-		gs != nullptr &&
-		configHandler != nullptr &&
-		gs->frameNum == configHandler->GetInt("ReplayCheckpointDebugSignatureFrame") &&
-		unit != nullptr &&
-		unit->id == REPLAY_CHECKPOINT_DEBUG_UNIT_SCRIPT_ANIM_UNIT_ID
-	);
+	if (
+		gs == nullptr ||
+		configHandler == nullptr ||
+		gs->frameNum != configHandler->GetInt("ReplayCheckpointDebugSignatureFrame") ||
+		unit == nullptr
+	)
+		return false;
+
+	const int debugUnitID = configHandler->GetInt("ReplayCheckpointDebugCobUnitID");
+	return (debugUnitID == -1 || unit->id == debugUnitID);
 }
 
 
@@ -236,7 +278,7 @@ void CUnitScript::TickAllAnims(int deltaTime)
 		}
 
 		// checksum all anims (live + done)
-		checksum = spring::LiteHash(ai, checksum);
+		checksum = HashAnimInfo(ai, checksum);
 	}
 
 	spring::VectorEraseIfAll(anims, [](const auto& ai) { return ai.done; });
@@ -959,6 +1001,23 @@ void CUnitScript::Explode(int piece, int flags)
 #ifndef _CONSOLE
 	const float3 relPos = GetPiecePos(piece);
 	const float3 absPos = unit->GetObjectSpacePos(relPos);
+	const bool replayCheckpointDebug = ReplayCheckpointShouldLogScriptUnit(unit);
+
+	if (replayCheckpointDebug) {
+		LOG("[ReplayCheckpoint][unit-script-explode] begin frame=%d unit=%d piece=%d flags=%d rng=%llu pos=<%f,%f,%f> speed=<%f,%f,%f,%f>",
+			gs->frameNum,
+			unit->id,
+			piece,
+			flags,
+			static_cast<unsigned long long>(gsRNG.GetGenState()),
+			absPos.x,
+			absPos.y,
+			absPos.z,
+			unit->speed.x,
+			unit->speed.y,
+			unit->speed.z,
+			unit->speed.w);
+	}
 
 	// do an explosion at the location first
 	if (!(flags & PF_NoHeatCloud))
@@ -979,12 +1038,29 @@ void CUnitScript::Explode(int piece, int flags)
 	// This means that we are going to do a full fledged piece explosion!
 	float3 baseSpeed = unit->speed;
 	float3 explSpeed;
+	const auto rngBeforeSpeed = gsRNG.GetGenState();
 	explSpeed.x = (0.5f -  gsRNG.NextFloat()) * 6.0f;
 	explSpeed.y =  1.2f + (gsRNG.NextFloat()  * 5.0f);
 	explSpeed.z = (0.5f -  gsRNG.NextFloat()) * 6.0f;
 
 	if (unit->pos.y - CGround::GetApproximateHeight(unit->pos.x, unit->pos.z) > 15)
 		explSpeed.y = (0.5f - gsRNG.NextFloat()) * 6.0f;
+
+	if (replayCheckpointDebug) {
+		LOG("[ReplayCheckpoint][unit-script-explode] speed frame=%d unit=%d piece=%d flags=%d rngBefore=%llu rngAfter=%llu expl=<%f,%f,%f> base=<%f,%f,%f>",
+			gs->frameNum,
+			unit->id,
+			piece,
+			flags,
+			static_cast<unsigned long long>(rngBeforeSpeed),
+			static_cast<unsigned long long>(gsRNG.GetGenState()),
+			explSpeed.x,
+			explSpeed.y,
+			explSpeed.z,
+			baseSpeed.x,
+			baseSpeed.y,
+			baseSpeed.z);
+	}
 
 	if (baseSpeed.SqLength() > 9.0f) {
 		const float l  = baseSpeed.Length();

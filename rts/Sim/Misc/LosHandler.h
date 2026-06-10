@@ -5,6 +5,7 @@
 
 #include <vector>
 #include <deque>
+#include <cstdint>
 
 #include "Map/Ground.h"
 #include "Sim/Misc/LosMap.h"
@@ -52,6 +53,7 @@ struct SLosInstance
 		, isQueuedForTerraform(false)
 	{}
 	void Init(int radius, int allyteam, int2 basePos, float baseHeight, int hashNum);
+	void SerializeReplayCheckpoint(creg::ISerializer* s);
 
 public:
 	// hash properties
@@ -134,6 +136,14 @@ public:
 	void UpdateHeightMapSynced(SRectangle rect);
 	void RemoveUnit(CUnit* unit, bool delayed = false);
 	void UpdateUnit(CUnit* unit, bool ignore = false);
+	void SerializeReplayCheckpoint(creg::ISerializer* s);
+	uint32_t GetReplayCheckpointStateHash() const;
+	uint32_t GetReplayCheckpointMapHash() const;
+	uint32_t GetReplayCheckpointQueueHash() const;
+	size_t GetReplayCheckpointDelayedDeleteCount() const { return delayedDeleteQue.size(); }
+	size_t GetReplayCheckpointDelayedTerraCount() const { return delayedTerraQue.size(); }
+	size_t GetReplayCheckpointLosUpdateCount() const { return losUpdate.size(); }
+	size_t GetReplayCheckpointLosCacheCount() const { return losCache.size(); }
 
 private:
 	//void PostLoad();
@@ -217,7 +227,10 @@ public:
 	void Init();
 	void Kill();
 	void ResetLiveMapsForLoad();
-	void SerializeReplayCheckpointLosMaps(creg::ISerializer* s);
+	void SerializeReplayCheckpointState(creg::ISerializer* s);
+	uint32_t GetReplayCheckpointStateHash() const;
+	uint32_t GetReplayCheckpointUnitLinkHash() const;
+	void LogReplayCheckpointStateSignature(const char* label) const;
 
 	// the Interface
 	bool InLos(const CUnit* unit, int allyTeam) const;
@@ -328,6 +341,7 @@ private:
 
 	std::vector<float> radarErrorSizes;
 	std::array<ILosType*, 7> losTypes;
+	bool replayCheckpointLosStateLoaded = false;
 };
 
 

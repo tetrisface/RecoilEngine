@@ -54,6 +54,9 @@ protected:
 	AnimContainerType anims;
 	AnimContainerType doneAnims;
 
+	static uint32_t HashAnimInfo(const AnimInfo& ai, uint32_t seed);
+	static uint32_t HashAnimContainer(const AnimContainerType& anims);
+
 	bool busy;
 	bool hasSetSFXOccupy;
 	bool hasRockUnit;
@@ -117,6 +120,8 @@ public:
 	const CUnit* GetUnit() const { return unit; }
 
 	auto GetAnimArrayChecksum() const { return checksum; }
+	uint32_t GetLiveAnimHash() const { return HashAnimContainer(anims); }
+	uint32_t GetDoneAnimHash() const { return HashAnimContainer(doneAnims); }
 	void TickAllAnims(int tickRate);
 	bool TickAnimFinished();
 	// note: must copy-and-set here (LMP dirty flag, etc)

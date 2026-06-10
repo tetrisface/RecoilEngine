@@ -65,18 +65,19 @@ inline bool CCobInstance::HasFunction(int id) const
 	return (cobFile->scriptIndex.size() > id && cobFile->scriptIndex[id] >= 0);
 }
 
-static constexpr int REPLAY_CHECKPOINT_DEBUG_COB_INSTANCE_UNIT_ID = 15919;
-
 static bool ReplayCheckpointDebugCobInstanceFrame(const CCobInstance* cobInst)
 {
-	return (
-		gs != nullptr &&
-		configHandler != nullptr &&
-		gs->frameNum == configHandler->GetInt("ReplayCheckpointDebugSignatureFrame") &&
-		cobInst != nullptr &&
-		cobInst->GetUnit() != nullptr &&
-		cobInst->GetUnit()->id == REPLAY_CHECKPOINT_DEBUG_COB_INSTANCE_UNIT_ID
-	);
+	if (
+		gs == nullptr ||
+		configHandler == nullptr ||
+		gs->frameNum != configHandler->GetInt("ReplayCheckpointDebugSignatureFrame") ||
+		cobInst == nullptr ||
+		cobInst->GetUnit() == nullptr
+	)
+		return false;
+
+	const int debugUnitID = configHandler->GetInt("ReplayCheckpointDebugCobUnitID");
+	return (debugUnitID == -1 || cobInst->GetUnit()->id == debugUnitID);
 }
 
 static const char* ReplayCheckpointCobFunctionName(const CCobFile* cobFile, int functionId)

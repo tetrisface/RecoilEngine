@@ -216,13 +216,50 @@ static CGroundMoveType::MemberData gmtMemberData = {
 static bool ReplayCheckpointDebugGroundMoveUnit(const CUnit* unit)
 {
 	const int debugFrame = configHandler->GetInt("ReplayCheckpointDebugSignatureFrame");
+	const int debugUnit = configHandler->GetInt("ReplayCheckpointDebugTargetQueryUnit");
 	return (
 		debugFrame >= 0 &&
+		debugUnit >= 0 &&
 		gs != nullptr &&
 		unit != nullptr &&
-		unit->id == 11630 &&
+		unit->id == debugUnit &&
 		gs->frameNum >= (debugFrame - 1) &&
 		gs->frameNum <= (debugFrame + 1)
+	);
+}
+
+static void LogReplayCheckpointGroundMoveHeading(
+	const char* phase,
+	const CUnit* unit,
+	short wantedHeading,
+	short rawDeltaHeading,
+	float dirSmoothing
+) {
+	if (!ReplayCheckpointDebugGroundMoveUnit(unit))
+		return;
+
+	const bool useGroundNormal = (!unit->upright && unit->IsOnGround());
+	const bool useObjectNormal = unit->IsInAir();
+	const float3 groundNormal = CGround::GetSmoothNormal(unit->pos.x, unit->pos.z);
+
+	LOG("[ReplayCheckpoint][GMT-heading] phase=%s frame=%d unit=%d heading=%d wanted=%d rawDelta=%d upright=%u onGround=%u inAir=%u useGround=%u useObject=%u smoothing=%.8g pos=<%.8g,%.8g,%.8g> groundNormal=<%.8g,%.8g,%.8g> front=<%.8g,%.8g,%.8g> up=<%.8g,%.8g,%.8g> right=<%.8g,%.8g,%.8g>",
+		phase,
+		gs->frameNum,
+		unit->id,
+		static_cast<int>(unit->heading),
+		static_cast<int>(wantedHeading),
+		static_cast<int>(rawDeltaHeading),
+		unit->upright ? 1u : 0u,
+		unit->IsOnGround() ? 1u : 0u,
+		unit->IsInAir() ? 1u : 0u,
+		useGroundNormal ? 1u : 0u,
+		useObjectNormal ? 1u : 0u,
+		dirSmoothing,
+		unit->pos.x, unit->pos.y, unit->pos.z,
+		groundNormal.x, groundNormal.y, groundNormal.z,
+		static_cast<float>(unit->frontdir.x), static_cast<float>(unit->frontdir.y), static_cast<float>(unit->frontdir.z),
+		static_cast<float>(unit->updir.x), static_cast<float>(unit->updir.y), static_cast<float>(unit->updir.z),
+		static_cast<float>(unit->rightdir.x), static_cast<float>(unit->rightdir.y), static_cast<float>(unit->rightdir.z)
 	);
 }
 
@@ -1554,6 +1591,7 @@ void CGroundMoveType::ChangeHeading(short newHeading) {
 
 	wantedHeading = newHeading;
 	if (owner->heading == wantedHeading) {
+		LogReplayCheckpointGroundMoveHeading("same-heading", owner, wantedHeading, 0, owner->unitDef->upDirSmoothing);
 		owner->UpdateDirVectors(!owner->upright && owner->IsOnGround(), owner->IsInAir(), owner->unitDef->upDirSmoothing);
 		return;
 	}
@@ -1569,6 +1607,7 @@ void CGroundMoveType::ChangeHeading(short newHeading) {
 	if (absDeltaHeading >= minScriptChangeHeading)
 		owner->script->ChangeHeading(rawDeltaHeading);
 
+	LogReplayCheckpointGroundMoveHeading("turn", owner, wantedHeading, rawDeltaHeading, owner->unitDef->upDirSmoothing);
 	owner->AddHeading(rawDeltaHeading, !owner->upright && owner->IsOnGround(), owner->IsInAir(), owner->unitDef->upDirSmoothing);
 
 	flatFrontDir = (owner->frontdir * XZVector).Normalize();

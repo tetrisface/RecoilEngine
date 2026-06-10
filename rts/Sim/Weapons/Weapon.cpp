@@ -13,6 +13,7 @@
 #include "Sim/Misc/CollisionVolume.h"
 #include "Sim/Misc/GlobalSynced.h"
 #include "Sim/Misc/InterceptHandler.h"
+#include "Sim/Misc/LosHandler.h"
 #include "Sim/Misc/ModInfo.h"
 #include "Sim/Misc/TeamHandler.h"
 #include "Sim/Misc/QuadField.h"
@@ -41,6 +42,21 @@ static bool ReplayCheckpointDebugWeaponFrame()
 {
 	const int debugFrame = configHandler->GetInt("ReplayCheckpointDebugSignatureFrame");
 	return (debugFrame >= 0 && gs != nullptr && gs->frameNum == debugFrame);
+}
+
+static bool ReplayCheckpointDebugWeaponUnit(const CUnit* owner, const CUnit* target)
+{
+	if (!ReplayCheckpointDebugWeaponFrame())
+		return false;
+
+	const int debugUnit = configHandler->GetInt("ReplayCheckpointDebugTargetQueryUnit");
+	if (debugUnit < 0)
+		return false;
+
+	return (
+		(owner != nullptr && owner->id == debugUnit) ||
+		(target != nullptr && target->id == debugUnit)
+	);
 }
 
 CR_BIND_DERIVED_POOL(CWeapon, CObject, , weaponMemPool.allocMem, weaponMemPool.freeMem)
@@ -1178,14 +1194,69 @@ bool CWeapon::TryTargetRotate(const CUnit* unit, bool userTarget, bool manualFir
 		tempTargetPos.z - aimFromPos.z
 	};
 
+	if (ReplayCheckpointDebugWeaponUnit(owner, unit)) {
+		LOG("[ReplayCheckpoint][weapon-try-rotate] frame=%d owner=%d weapon=%d target=%d aim=<%.8g,%.8g,%.8g> main=<%.8g,%.8g,%.8g> muzzle=<%.8g,%.8g,%.8g> tempTarget=<%.8g,%.8g,%.8g> aimToTarget=<%.8g,%.8g,%.8g> ownerPos=<%.8g,%.8g,%.8g> ownerMid=<%.8g,%.8g,%.8g> ownerHeading=%d targetPos=<%.8g,%.8g,%.8g> targetMid=<%.8g,%.8g,%.8g> targetAim=<%.8g,%.8g,%.8g> targetSpeed=<%.8g,%.8g,%.8g,%.8g> weaponHeading=%d",
+			gs->frameNum,
+			(owner != nullptr) ? owner->id : -1,
+			weaponNum,
+			(unit != nullptr) ? unit->id : -1,
+			aimFromPos.x, aimFromPos.y, aimFromPos.z,
+			mainDir.x, mainDir.y, mainDir.z,
+			weaponMuzzlePos.x, weaponMuzzlePos.y, weaponMuzzlePos.z,
+			tempTargetPos.x, tempTargetPos.y, tempTargetPos.z,
+			aimToTgt.x, aimToTgt.y, aimToTgt.z,
+			owner->pos.x, owner->pos.y, owner->pos.z,
+			static_cast<float>(owner->midPos.x), static_cast<float>(owner->midPos.y), static_cast<float>(owner->midPos.z),
+			static_cast<int>(owner->heading),
+			(unit != nullptr) ? unit->pos.x : 0.0f,
+			(unit != nullptr) ? unit->pos.y : 0.0f,
+			(unit != nullptr) ? unit->pos.z : 0.0f,
+			(unit != nullptr) ? static_cast<float>(unit->midPos.x) : 0.0f,
+			(unit != nullptr) ? static_cast<float>(unit->midPos.y) : 0.0f,
+			(unit != nullptr) ? static_cast<float>(unit->midPos.z) : 0.0f,
+			(unit != nullptr) ? static_cast<float>(unit->aimPos.x) : 0.0f,
+			(unit != nullptr) ? static_cast<float>(unit->aimPos.y) : 0.0f,
+			(unit != nullptr) ? static_cast<float>(unit->aimPos.z) : 0.0f,
+			(unit != nullptr) ? unit->speed.x : 0.0f,
+			(unit != nullptr) ? unit->speed.y : 0.0f,
+			(unit != nullptr) ? unit->speed.z : 0.0f,
+			(unit != nullptr) ? unit->speed.w : 0.0f,
+			static_cast<int>(weaponHeading)
+		);
+	}
+
 	// if the aimToTgt is (close to) degenerate then enemyHeading value makes no sense,
 	// use the owner's heading instead
 	if unlikely(aimToTgt.SqLength2D() < 1.0f) {
-		return TryTargetHeading(owner->heading - weaponHeading, trg);
+		const short testHeading = owner->heading - weaponHeading;
+		if (ReplayCheckpointDebugWeaponUnit(owner, unit)) {
+			LOG("[ReplayCheckpoint][weapon-try-heading-input] frame=%d owner=%d weapon=%d target=%d source=degenerate ownerHeading=%d weaponHeading=%d testHeading=%d",
+				gs->frameNum,
+				owner->id,
+				weaponNum,
+				(unit != nullptr) ? unit->id : -1,
+				static_cast<int>(owner->heading),
+				static_cast<int>(weaponHeading),
+				static_cast<int>(testHeading)
+			);
+		}
+		return TryTargetHeading(testHeading, trg);
 	}
 
 	const short enemyHeading = GetHeadingFromVector(aimToTgt.x, aimToTgt.z);
-	return TryTargetHeading(enemyHeading - weaponHeading, trg);
+	const short testHeading = enemyHeading - weaponHeading;
+	if (ReplayCheckpointDebugWeaponUnit(owner, unit)) {
+		LOG("[ReplayCheckpoint][weapon-try-heading-input] frame=%d owner=%d weapon=%d target=%d source=rotate enemyHeading=%d weaponHeading=%d testHeading=%d",
+			gs->frameNum,
+			owner->id,
+			weaponNum,
+			(unit != nullptr) ? unit->id : -1,
+			static_cast<int>(enemyHeading),
+			static_cast<int>(weaponHeading),
+			static_cast<int>(testHeading)
+		);
+	}
+	return TryTargetHeading(testHeading, trg);
 }
 
 
@@ -1468,17 +1539,55 @@ void CWeapon::AdjustTargetPosToWater(float3& tgtPos, bool attackGround) const
 float3 CWeapon::GetUnitPositionWithError(const CUnit* unit) const
 {
 	RECOIL_DETAILED_TRACY_ZONE;
-	float3 errorPos = unit->GetErrorPos(owner->allyteam, true);
+	const int ownerAllyTeam = owner->allyteam;
+	const float3 targetErrorVector = unit->GetErrorVector(ownerAllyTeam);
+	const float3 targetAimPos = {
+		static_cast<float>(unit->aimPos.x),
+		static_cast<float>(unit->aimPos.y),
+		static_cast<float>(unit->aimPos.z)
+	};
+	const float3 rawErrorPos = targetAimPos + targetErrorVector;
+	float3 errorPos = rawErrorPos;
 	if (doTargetGroundPos) errorPos -= unit->aimPos - unit->pos;
 	const float errorScale = (MoveErrorExperience() * GAME_SPEED * unit->speed.w);
-	return errorPos + errorVector * errorScale;
+	const float3 result = errorPos + errorVector * errorScale;
+
+	if (ReplayCheckpointDebugWeaponUnit(owner, unit)) {
+		const unsigned short targetLosStatus = unit->losStatus[ownerAllyTeam];
+		const bool targetInLos = losHandler->InLos(unit, ownerAllyTeam);
+		const bool targetInRadar = losHandler->InRadar(unit, ownerAllyTeam);
+		LOG("[ReplayCheckpoint][weapon-target-error] frame=%d owner=%d ownerAlly=%d target=%d targetTeam=%d targetAlly=%d losStatus=%u posErrorBit=%u inLos=%u inRadar=%u doGround=%u errorScale=%.8g raw=<%.8g,%.8g,%.8g> adjusted=<%.8g,%.8g,%.8g> targetError=<%.8g,%.8g,%.8g> result=<%.8g,%.8g,%.8g> targetAim=<%.8g,%.8g,%.8g> targetPos=<%.8g,%.8g,%.8g>",
+			gs->frameNum,
+			owner->id,
+			ownerAllyTeam,
+			unit->id,
+			unit->team,
+			unit->allyteam,
+			static_cast<unsigned int>(targetLosStatus),
+			unit->GetPosErrorBit(ownerAllyTeam) ? 1u : 0u,
+			targetInLos ? 1u : 0u,
+			targetInRadar ? 1u : 0u,
+			doTargetGroundPos ? 1u : 0u,
+			errorScale,
+			rawErrorPos.x, rawErrorPos.y, rawErrorPos.z,
+			errorPos.x, errorPos.y, errorPos.z,
+			targetErrorVector.x, targetErrorVector.y, targetErrorVector.z,
+			result.x, result.y, result.z,
+			targetAimPos.x, targetAimPos.y, targetAimPos.z,
+			unit->pos.x, unit->pos.y, unit->pos.z
+		);
+	}
+
+	return result;
 }
 
 
 float3 CWeapon::GetUnitLeadTargetPos(const CUnit* unit) const
 {
 	RECOIL_DETAILED_TRACY_ZONE;
-	const float3 tmpTargetPos = GetUnitPositionWithError(unit) + GetLeadVec(unit);
+	const float3 unitPositionWithError = GetUnitPositionWithError(unit);
+	const float3 leadVec = GetLeadVec(unit);
+	const float3 tmpTargetPos = unitPositionWithError + leadVec;
 	const float3 tmpTargetDir = (tmpTargetPos - aimFromPos).SafeNormalize();
 
 	float3 aimPos = GetTargetBorderPos(unit, tmpTargetPos, tmpTargetDir);
@@ -1487,6 +1596,34 @@ float3 CWeapon::GetUnitLeadTargetPos(const CUnit* unit) const
 	// never target below water if not a water-weapon
 	aimPos.y = std::max(aimPos.y, CGround::GetApproximateHeight(aimPos.x, aimPos.z) + 2.0f);
 	aimPos.y = std::max(aimPos.y, aimPos.y * weaponDef->waterweapon);
+
+	if (ReplayCheckpointDebugWeaponUnit(owner, unit)) {
+		LOG("[ReplayCheckpoint][weapon-lead-target] frame=%d owner=%d weapon=%d target=%d posError=<%.8g,%.8g,%.8g> lead=<%.8g,%.8g,%.8g> tmpTarget=<%.8g,%.8g,%.8g> tmpDir=<%.8g,%.8g,%.8g> borderAim=<%.8g,%.8g,%.8g> aim=<%.8g,%.8g,%.8g> muzzle=<%.8g,%.8g,%.8g> error=<%.8g,%.8g,%.8g> errorAdd=<%.8g,%.8g,%.8g> targetPos=<%.8g,%.8g,%.8g> targetAim=<%.8g,%.8g,%.8g> targetSpeed=<%.8g,%.8g,%.8g,%.8g>",
+			gs->frameNum,
+			(owner != nullptr) ? owner->id : -1,
+			weaponNum,
+			(unit != nullptr) ? unit->id : -1,
+			unitPositionWithError.x, unitPositionWithError.y, unitPositionWithError.z,
+			leadVec.x, leadVec.y, leadVec.z,
+			tmpTargetPos.x, tmpTargetPos.y, tmpTargetPos.z,
+			tmpTargetDir.x, tmpTargetDir.y, tmpTargetDir.z,
+			aimPos.x, aimPos.y, aimPos.z,
+			aimFromPos.x, aimFromPos.y, aimFromPos.z,
+			weaponMuzzlePos.x, weaponMuzzlePos.y, weaponMuzzlePos.z,
+			errorVector.x, errorVector.y, errorVector.z,
+			errorVectorAdd.x, errorVectorAdd.y, errorVectorAdd.z,
+			(unit != nullptr) ? unit->pos.x : 0.0f,
+			(unit != nullptr) ? unit->pos.y : 0.0f,
+			(unit != nullptr) ? unit->pos.z : 0.0f,
+			(unit != nullptr) ? static_cast<float>(unit->aimPos.x) : 0.0f,
+			(unit != nullptr) ? static_cast<float>(unit->aimPos.y) : 0.0f,
+			(unit != nullptr) ? static_cast<float>(unit->aimPos.z) : 0.0f,
+			(unit != nullptr) ? unit->speed.x : 0.0f,
+			(unit != nullptr) ? unit->speed.y : 0.0f,
+			(unit != nullptr) ? unit->speed.z : 0.0f,
+			(unit != nullptr) ? unit->speed.w : 0.0f
+		);
+	}
 
 	return aimPos;
 }

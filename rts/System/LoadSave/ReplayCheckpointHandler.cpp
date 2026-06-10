@@ -13,7 +13,9 @@
 #include "System/FileSystem/DataDirsAccess.h"
 #include "System/FileSystem/FileQueryFlags.h"
 #include "System/FileSystem/FileSystem.h"
+#include "System/LoadSave/LoadSaveHandler.h"
 #include "System/LoadSave/DemoRecorder.h"
+#include "System/LoadSave/ReplayCheckpointSavePlanner.h"
 #include "System/Log/ILog.h"
 #include "System/Misc/SpringTime.h"
 #include "System/StringUtil.h"
@@ -60,6 +62,10 @@ static bool pendingHotLoadWasServerPaused = false;
 static spring_time lastAutoSaveWallTime = spring_gettime();
 static bool sessionFinalized = false;
 
+static std::string EnsurePathSepAtEnd(const std::string& path)
+{
+	return FileSystem::EnsurePathSepAtEnd(path);
+}
 
 static std::string ResolveDemoPath(const std::string& demoPath)
 {
@@ -195,16 +201,6 @@ std::string GetBundleDirForDemo(const std::string& demoPath)
 	return ResolveBundleDir(demoPath);
 }
 
-std::string MakeSaveFileName(int frame)
-{
-	return "Saves/replaycheckpoint_" + IntToString(frame, "%06i") + ".ssf";
-}
-
-std::string MakeBundledSaveFileName(int frame, const std::string& bundleDir)
-{
-	return FileSystem::EnsurePathSepAtEnd(bundleDir) + "replaycheckpoint_" + IntToString(frame, "%06i") + ".ssf";
-}
-
 void InitPlaybackContext(const std::string& demoPath)
 {
 	ClearActiveContext();
@@ -317,20 +313,18 @@ bool QueueSaveCurrentFrame(bool overwrite)
 		return false;
 
 	const int frame = gs->frameNum;
-	std::string fileName;
-
-	if (activeContext.mode == DemoContextMode::Recording && !activeContext.bundleDir.empty()) {
-		fileName = MakeBundledSaveFileName(frame, activeContext.bundleDir);
-	} else {
-		fileName = MakeSaveFileName(frame);
-	}
-
-	std::string saveArgs = overwrite ? "-y" : "";
+	const SaveRequest request = MakeSaveRequest(frame, overwrite, activeContext.mode, activeContext.bundleDir, EnsurePathSepAtEnd);
 
 	saveInFlight = true;
-	game->Save(std::move(fileName), std::move(saveArgs));
-	LOG("[ReplayCheckpoint] queued checkpoint save for frame %d", frame);
-	return true;
+
+	// Checkpoints are frame-addressed artifacts. Using the generic deferred save
+	// queue can serialize a later frame while keeping this frame in the filename.
+	const bool saved = ExecuteSaveRequest(request, ILoadSaveHandler::CreateSave);
+	if (saved)
+		LOG("[ReplayCheckpoint] saved checkpoint for frame %d", frame);
+	else
+		LOG_L(L_WARNING, "[ReplayCheckpoint] failed to save checkpoint for frame %d", frame);
+	return saved;
 }
 
 static bool LoadFrameNow(int targetFrame)

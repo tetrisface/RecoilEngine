@@ -32,10 +32,53 @@ inline int __bsfd (int mask)
 #include "System/SpringMath.h"
 
 #include "System/Misc/TracyDefs.h"
+#ifdef USING_CREG
+#include "System/creg/ISerializer.h"
+#endif
 
 unsigned int QTPFS::NodeLayer::NUM_SPEEDMOD_BINS;
 float        QTPFS::NodeLayer::MIN_SPEEDMOD_VALUE;
 float        QTPFS::NodeLayer::MAX_SPEEDMOD_VALUE;
+
+#ifdef USING_CREG
+namespace {
+	static void SerializeReplayCheckpointBoolByte(creg::ISerializer* s, bool& value)
+	{
+		uint8_t storedValue = value ? 1u : 0u;
+		s->Serialize(storedValue);
+		if (!s->IsWriting())
+			value = (storedValue != 0u);
+	}
+
+	template<typename T>
+	static void SerializeReplayCheckpointVectorRaw(creg::ISerializer* s, std::vector<T>& values)
+	{
+		uint32_t valueCount = static_cast<uint32_t>(values.size());
+		s->Serialize(valueCount);
+		if (!s->IsWriting())
+			values.resize(valueCount);
+		if (!values.empty())
+			s->Serialize(values.data(), static_cast<int>(values.size() * sizeof(T)));
+	}
+
+	static void SerializeReplayCheckpointNodeSpeedBinCaches(
+		creg::ISerializer* s,
+		std::vector<QTPFS::NodeLayer::NodeSpeedBinCache>& caches
+	)
+	{
+		uint32_t cacheCount = static_cast<uint32_t>(caches.size());
+		s->Serialize(cacheCount);
+		if (!s->IsWriting())
+			caches.resize(cacheCount);
+
+		for (QTPFS::NodeLayer::NodeSpeedBinCache& cache: caches) {
+			for (QTPFS::NodeLayer::MapSquareData& square: cache) {
+				s->Serialize(square.bin);
+			}
+		}
+	}
+}
+#endif
 
 void QTPFS::NodeLayer::InitStatic() {
 	RECOIL_DETAILED_TRACY_ZONE;
@@ -116,6 +159,59 @@ void QTPFS::NodeLayer::Clear() {
 	mapSquareStatusCache.clear();
 }
 
+#ifdef USING_CREG
+void QTPFS::NodeLayer::SerializeReplayCheckpoint(creg::ISerializer* s)
+{
+	RECOIL_DETAILED_TRACY_ZONE;
+
+	uint32_t poolChunkCount = NUM_POOL_CHUNKS;
+	s->Serialize(poolChunkCount);
+	assert(poolChunkCount == NUM_POOL_CHUNKS);
+
+	for (uint32_t chunkIndex = 0; chunkIndex < poolChunkCount; ++chunkIndex) {
+		std::vector<QTNode>& poolChunk = poolNodes[chunkIndex];
+		uint32_t nodeCount = static_cast<uint32_t>(poolChunk.size());
+		s->Serialize(nodeCount);
+		if (!s->IsWriting())
+			poolChunk.resize(nodeCount);
+
+		for (QTNode& node: poolChunk) {
+			node.SerializeReplayCheckpoint(s);
+		}
+	}
+
+	SerializeReplayCheckpointVectorRaw(s, nodeIndcs);
+
+	if (!s->IsWriting()) {
+		selectedNodes.clear();
+		openNodes.clear();
+		selectedNodes.reserve(256);
+		openNodes.reserve(256);
+	}
+
+	SerializeReplayCheckpointVectorRaw(s, curSpeedMods);
+	SerializeReplayCheckpointVectorRaw(s, curSpeedBins);
+	SerializeReplayCheckpointNodeSpeedBinCaches(s, mapSquareStatusCache);
+
+	s->Serialize(layerNumber);
+	s->Serialize(numLeafNodes);
+	s->Serialize(updateCounter);
+	s->Serialize(numOpenNodes);
+	s->Serialize(numClosedNodes);
+	s->Serialize(maxNodesAlloced);
+	s->Serialize(numRootNodes);
+	s->Serialize(xRootNodes);
+	s->Serialize(zRootNodes);
+	s->Serialize(rootNodeSize);
+	s->Serialize(rootMask);
+	s->Serialize(xsize);
+	s->Serialize(zsize);
+	s->Serialize(maxRelSpeedMod);
+	s->Serialize(avgRelSpeedMod);
+	SerializeReplayCheckpointBoolByte(s, useShortestPath);
+}
+#endif
+
 
 bool QTPFS::NodeLayer::Update(UpdateThreadData& threadData) {
 	RECOIL_DETAILED_TRACY_ZONE;
@@ -183,7 +279,12 @@ bool QTPFS::NodeLayer::Update(UpdateThreadData& threadData) {
 	};
 
 	bool updateRequired = false;
-	auto& sectorCache = mapSquareStatusCache[GetSectorIndex(r.x1, r.z1)];
+	auto getSectorCacheEntry = [this](uint32_t x, uint32_t z) -> MapSquareData& {
+		auto& sectorCache = mapSquareStatusCache[GetSectorIndex(x, z)];
+		const uint32_t localX = x % NODE_CACHE_SECTOR_STRIDE;
+		const uint32_t localZ = z % NODE_CACHE_SECTOR_STRIDE;
+		return sectorCache[localZ * NODE_CACHE_SECTOR_STRIDE + localX];
+	};
 
 	// divide speed-modifiers into bins
 	unsigned int recIdx =  0;
@@ -229,8 +330,9 @@ bool QTPFS::NodeLayer::Update(UpdateThreadData& threadData) {
 
 			const bool isExitOnlyZone = md->IsInExitOnly(chmx, chmz);
 			MapSquareData curSquareState(curSpeedBins[recIdx], isExitOnlyZone);
-			if (curSquareState != sectorCache[recIdx]) {
-				sectorCache[recIdx] = curSquareState;
+			MapSquareData& cachedSquareState = getSectorCacheEntry(hmx, hmz);
+			if (curSquareState != cachedSquareState) {
+				cachedSquareState = curSquareState;
 				updateRequired = true;
 			}
 		}

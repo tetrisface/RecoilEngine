@@ -332,6 +332,8 @@ static void LogReplayCheckpointStateSignature(const char* label)
 
 	smoothGround.LogReplayCheckpointStateSignature(label);
 	pathManager->LogReplayCheckpointStateSignature(label);
+	if (losHandler != nullptr)
+		losHandler->LogReplayCheckpointStateSignature(label);
 }
 
 static void RebuildReplayCheckpointGroundMovePaths()

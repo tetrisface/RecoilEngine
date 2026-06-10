@@ -201,6 +201,111 @@ Reset-on-save:
   postload cannot replace serialized smooth queues during replay checkpoint
   restore.
 
+## 2026-06-10 LocalModel Bounding-Volume Outcome
+
+- Fresh fixture `.cache/replay-timeline-synctest/run_20260610_104413` narrowed
+  the next checkpoint-180 desync to projectile collision against unit-local
+  model bounds. Projectile `10008` and unit `11277` matched on projectile state,
+  script animation state, visible collidable pieces, and transforms, but the
+  restored aggregate `LocalModel::boundingVolume` differed from the original.
+- The ownership issue was `LocalModel::SetModel(model, false)`: this post-load
+  path needs to reattach `S3DModelPiece` pointers and rebuild piece transforms,
+  but it should not recompute aggregate bounds that CREG already restored from
+  the checkpoint.
+- The current fix preserves serialized `boundingVolume` and
+  `needsBoundariesRecalc` while reattaching model pointers. That keeps the
+  invariant subsystem-local: CREG restores exact state, `LocalModel` restores
+  model references, and projectile collision consumes the restored state through
+  its existing interfaces.
+- Current strict scripted evidence passed:
+  `.cache/replay-checkpoint-smoke/strict_target180_resume421_after_localmodel_bounds_unit_script_filter_infolog.txt`
+  restored `SaveFrame=180` from request frame `301`, resumed to `421`, and
+  matched post-restore digest `VkJSDt8CijCeDsL6mNY/2Q==` for frames `180..419`.
+- Candidate PR/test seam: `test_LocalModel.exe` now covers the owner-local
+  post-load boundary for `LocalModel::SetModel(model, false)`: synthetic
+  same-piece-count models prove piece pointer reattachment does not replace the
+  serialized aggregate collision bounds or dirty flag. A later CREG round trip
+  can wrap the same invariant when a small load/save harness is available.
+  Keep the focused projectile/local-model diagnostics gated by
+  `ReplayCheckpointDebugDamageProjectileID`,
+  `ReplayCheckpointDebugTargetQueryUnit`, and `ReplayCheckpointDebugCobUnitID`
+  until that seam exists. `ReplayCheckpointDebugCobUnitID` now uses `-2` as the
+  disabled default, `-1` only when all-unit COB/unit-script traces are requested,
+  and non-negative values for a specific unit; this prevents a generic
+  `ReplayCheckpointDebugSignatureFrame` run from enabling heavyweight COB traces
+  by accident.
+- The selector cleanup was verified after rebuild with
+  `.cache/replay-checkpoint-smoke/debug_signature_frame271_target270_no_cob_default_after_diag_gate_infolog.txt`:
+  the run restored target `270`, resumed to `272`, emitted compact signature and
+  QTPFS markers, and produced `0` COB/unit-script trace matches with the default
+  `ReplayCheckpointDebugCobUnitID=-2`.
+
+## 2026-06-10 Exact Saves And QTPFS Search-State Outcome
+
+- The next target-270 drift was two separate ownership issues. First, checkpoint
+  artifacts must be written at the named frame: using the generic deferred
+  `game->Save(...)` path allowed a file named for frame `N` to serialize a later
+  frame. `ReplayCheckpointHandler::QueueSaveCurrentFrame()` now creates the
+  `.ssf` immediately through `ILoadSaveHandler::CreateSave(...)`, keeping
+  frame-addressed checkpoint ownership in the replay checkpoint recorder.
+- Second, QTPFS path snapshots alone were not enough for later checkpoints. The
+  original path had active or just-completed searches that `PathManager::Update()`
+  consumed on the next frame. Restore now owns that state inside QTPFS: live path
+  payloads, `SearchModeIPath` result snapshots, `PathSearchRef`, `ProcessPath`,
+  search component kind, and full/partial result flags are serialized and
+  restored before the registry is pruned.
+- Fresh seeded fixture
+  `.cache/replay-timeline-synctest/run_20260610_155131` with seed
+  `2091638182` recorded digest `v2gwCY6m6aBluwoahUyYJw==` for frames `0..419`.
+  The record script verified exact checkpoints at frames `90`, `180`, `270`,
+  and `360`.
+- Current strict scripted evidence:
+  - target `90` restored from request frame `211`, resumed to `421`, and
+    matched digest `MavJ/YTMPnp++3XqSnAbwQ==` for `90..419`.
+  - target `180` restored from request frame `301`, resumed to `421`, and
+    matched digest `kLVEK2n19naL7+R3vQjjWA==` for `180..419`.
+  - target `270` restored from request frame `361`, restored one ready QTPFS
+    search envelope, resumed to `421`, and matched digest
+    `j1VvhhtzpLCypcFkAODfBg==` for `270..419`.
+  - target `360` restored from request frame `401`, resumed to `421`, and
+    matched digest `ixH/QnRdi7c+oYs7psxq9A==` for `360..419`.
+- BAR LuaUI replay-widget acceptance evidence now covers the same fixture and
+  checkpoint set using the default smoke driver. Each restore log loads
+  `gui_replaybuttons.lua` before and after checkpoint restore, resumes to
+  frame `421`, and matches the recorded replay from the restored frame onward:
+  target `90` matches `MavJ/YTMPnp++3XqSnAbwQ==`, target `180` matches
+  `kLVEK2n19naL7+R3vQjjWA==`, target `270` restores one ready QTPFS search and
+  matches `j1VvhhtzpLCypcFkAODfBg==`, and target `360` matches
+  `ixH/QnRdi7c+oYs7psxq9A==`.
+- BAR replay timeline forward-jump acceptance evidence also passes on the same
+  fixture: `StartFrame=30`, `TargetFrame=181`, `QuitFrame=421`,
+  `gui_replaybuttons.lua` loaded, target frame `181` reached, and full replay
+  digest `v2gwCY6m6aBluwoahUyYJw==` matched for `0..419`.
+- Candidate PR/test seams: exact-frame checkpoint-save ownership in
+  `ReplayCheckpointHandler` now has a first owner-local unit seam:
+  `test_ReplayCheckpointSavePlanner.exe` covers current-frame filenames, active
+  bundle paths, overwrite args, immediate create-save dispatch, and callback
+  failure propagation through an injected create-save callback. The planner also
+  injects directory normalization, while production keeps using
+  `FileSystem::EnsurePathSepAtEnd`. Remaining upstreamable seams are a
+  fuller QTPFS replay checkpoint search-state round-trip, a fuller
+  `CFeatureHandler` queue-repair test, and a small `PathManager` finalization
+  cleanup for empty restored allocator placeholders. The first QTPFS-local
+  search-envelope unit seam is now `test_QTPFSSearchState.exe`: it covers
+  capture/apply of the `PathSearch` replay flags and the important restore rule
+  that `initialized` only comes back for ready `ProcessPath` searches. The first
+  QTPFS-local path-payload seam is now `test_QTPFSPathState.exe`: it covers
+  capture/apply of the serializable `IPath` payload while leaving owner lookup,
+  entity/component restoration, shared caches, and checkpoint serialization
+  order in `PathManager`. The feature creation-frame update-queue boundary now
+  has a first pure unit seam:
+  `test_FeatureQueuePolicy.exe` covers restored frame `N`/`N + 1` creation
+  notifications, stale stationary features, missing restore-frame context, and
+  the dynamic feature cases that must remain queued after load.
+- Keep the UI smokes as branch acceptance evidence, but make the upstreamable
+  correctness tests smaller and owner-local so regressions identify the exact
+  save-frame, QTPFS search-state, feature queue, or cleanup boundary.
+
 ## 2026-06-09 PR Extraction Notes
 
 - Keep first extraction around reproducible fixtures and smoke scripts. They

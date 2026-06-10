@@ -363,6 +363,58 @@ endif()
 	endif (NOT NO_CREG)
 
 ################################################################################
+### ReplayCheckpointSavePlanner
+	set(test_name ReplayCheckpointSavePlanner)
+	set(test_src
+			"${CMAKE_CURRENT_SOURCE_DIR}/engine/System/LoadSave/testReplayCheckpointSavePlanner.cpp"
+			"${ENGINE_SOURCE_DIR}/System/LoadSave/ReplayCheckpointSavePlanner.cpp"
+			${test_Common_sources}
+		)
+	set(test_libs
+			""
+		)
+	add_spring_test(${test_name} "${test_src}" "${test_libs}" "-DNOT_USING_CREG -DBUILDING_AI")
+
+################################################################################
+### FeatureQueuePolicy
+	set(test_name FeatureQueuePolicy)
+	set(test_src
+			"${CMAKE_CURRENT_SOURCE_DIR}/engine/Sim/Features/testFeatureUpdateQueuePolicy.cpp"
+			"${ENGINE_SOURCE_DIR}/Sim/Features/FeatureUpdateQueuePolicy.cpp"
+			${test_Common_sources}
+		)
+	set(test_libs
+			""
+		)
+	add_spring_test(${test_name} "${test_src}" "${test_libs}" "-DNOT_USING_CREG -DBUILDING_AI")
+
+################################################################################
+### QTPFSPathState
+	set(test_name QTPFSPathState)
+	set(test_src
+			"${CMAKE_CURRENT_SOURCE_DIR}/engine/Sim/Path/QTPFS/testPathReplayCheckpointState.cpp"
+			"${ENGINE_SOURCE_DIR}/Sim/Path/QTPFS/PathReplayCheckpointState.cpp"
+			${test_Common_sources}
+		)
+	set(test_libs
+			""
+		)
+	add_spring_test(${test_name} "${test_src}" "${test_libs}" "-DNOT_USING_CREG -DBUILDING_AI")
+
+################################################################################
+### QTPFSSearchState
+	set(test_name QTPFSSearchState)
+	set(test_src
+			"${CMAKE_CURRENT_SOURCE_DIR}/engine/Sim/Path/QTPFS/testPathSearchReplayCheckpointState.cpp"
+			"${ENGINE_SOURCE_DIR}/Sim/Path/QTPFS/PathSearchReplayCheckpointState.cpp"
+			${test_Common_sources}
+		)
+	set(test_libs
+			""
+		)
+	add_spring_test(${test_name} "${test_src}" "${test_libs}" "-DNOT_USING_CREG -DBUILDING_AI")
+
+################################################################################
 ### UnitSync
 	set(test_name UnitSync)
 	set(test_src
@@ -505,6 +557,30 @@ endif()
 			""
 		)
 	add_spring_test(${test_name} "${test_src}" "${test_libs}" "")
+
+################################################################################
+### LocalModel
+	set(test_name LocalModel)
+	set(test_src
+			"${CMAKE_CURRENT_SOURCE_DIR}/engine/Rendering/Models/testLocalModel.cpp"
+			"${ENGINE_SOURCE_DIR}/Rendering/Models/LocalModel.cpp"
+			"${ENGINE_SOURCE_DIR}/Rendering/Models/ModelsMemStorage.cpp"
+			"${ENGINE_SOURCE_DIR}/Rendering/Common/UpdateList.cpp"
+			"${ENGINE_SOURCE_DIR}/Sim/Misc/CollisionVolume.cpp"
+			"${ENGINE_SOURCE_DIR}/System/Matrix44f.cpp"
+			"${ENGINE_SOURCE_DIR}/System/Platform/Win/CriticalSection.cpp"
+			"${ENGINE_SOURCE_DIR}/System/Quaternion.cpp"
+			"${ENGINE_SOURCE_DIR}/System/Transform.cpp"
+			"${ENGINE_SOURCE_DIR}/System/float3.cpp"
+			"${ENGINE_SOURCE_DIR}/System/float4.cpp"
+			${test_Common_sources}
+		)
+	set(test_libs
+			smmalloc
+			streflop
+		)
+	set(test_flags "-DNOT_USING_CREG -DBUILDING_AI")
+	add_spring_test(${test_name} "${test_src}" "${test_libs}" "${test_flags}")
 
 ################################################################################
 ### SerializeLuaState

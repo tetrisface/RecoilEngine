@@ -12,8 +12,11 @@
 #include "PathSearch.h"
 
 #include "Sim/Misc/GlobalConstants.h"
+#include "Sim/Misc/GlobalSynced.h"
 #include "Sim/Misc/CollisionHandler.h"
 #include "Sim/Misc/CollisionVolume.h"
+#include "Sim/Objects/SolidObject.h"
+#include "System/Config/ConfigHandler.h"
 #include "System/Log/ILog.h"
 #include "System/Rectangle.h"
 
@@ -43,6 +46,25 @@ static void GetRectangleCollisionVolume(const SRectangle& r, CollisionVolume& v,
 	#define CV CollisionVolume
 	v.InitShape(vScales, ZeroVector, CV::COLVOL_TYPE_BOX, CV::COLVOL_HITTEST_CONT, CV::COLVOL_AXIS_Y);
 	#undef CV
+}
+
+static bool ReplayCheckpointDebugPathCacheFrame()
+{
+	const int debugFrame = configHandler->GetInt("ReplayCheckpointDebugSignatureFrame");
+	return (debugFrame >= 0 && gs != nullptr && gs->frameNum >= (debugFrame - (GAME_SPEED * 2)) && gs->frameNum <= debugFrame);
+}
+
+static bool ReplayCheckpointDebugPathCachePath(QTPFS::entity entity, const QTPFS::IPath* path, bool intersectsPath)
+{
+	if (!ReplayCheckpointDebugPathCacheFrame())
+		return false;
+	if (intersectsPath)
+		return true;
+	if (static_cast<unsigned int>(entt::to_integral(entity)) == 62u)
+		return true;
+
+	const CSolidObject* owner = (path != nullptr) ? path->GetOwner() : nullptr;
+	return (owner != nullptr && owner->id == 22726);
 }
 
 bool QTPFS::PathCache::MarkDeadPaths(const SRectangle& r, const NodeLayer& nodeLayer) {
@@ -176,6 +198,42 @@ bool QTPFS::PathCache::MarkDeadPaths(const SRectangle& r, const NodeLayer& nodeL
 
 			// remember the ID of each path affected by the deformation
 			intersectsPath = (havePointInRect || edgeCrossesRect);
+
+			if (ReplayCheckpointDebugPathCachePath(entity, path, intersectsPath)) {
+				const CSolidObject* owner = path->GetOwner();
+				LOG("[ReplayCheckpoint][qtpfs-cache] raw frame=%d layer=%d path=%u owner=%d rect=<%d,%d,%d,%d> p0In=%u p1In=%u point=%u xIn=%u xEx=%u zIn=%u zEx=%u edge=%u intersects=%u bbox=<%.8g,%.8g,%.8g,%.8g> p0=<%.8g,%.8g,%.8g> p1=<%.8g,%.8g,%.8g> rm=<%.8g,%.8g,%.8g>",
+					gs->frameNum,
+					pathType,
+					static_cast<unsigned int>(entt::to_integral(entity)),
+					(owner != nullptr) ? owner->id : 0,
+					r.x1,
+					r.z1,
+					r.x2,
+					r.z2,
+					p0InRect ? 1u : 0u,
+					p1InRect ? 1u : 0u,
+					havePointInRect ? 1u : 0u,
+					xRangeInRect ? 1u : 0u,
+					xRangeExRect ? 1u : 0u,
+					zRangeInRect ? 1u : 0u,
+					zRangeExRect ? 1u : 0u,
+					edgeCrossesRect ? 1u : 0u,
+					intersectsPath ? 1u : 0u,
+					pathMins.x,
+					pathMins.z,
+					pathMaxs.x,
+					pathMaxs.z,
+					p0.x,
+					p0.y,
+					p0.z,
+					p1.x,
+					p1.y,
+					p1.z,
+					rm.x,
+					rm.y,
+					rm.z
+				);
+			}
 		}
 		else
 		{

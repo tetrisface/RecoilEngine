@@ -43,18 +43,6 @@ CR_REG_METADATA(CUnitScriptEngine, (
 	CR_IGNORED(currentScript)
 ))
 
-template<typename T>
-static uint32_t ReplayCheckpointHashAnimationVector(const T& anims)
-{
-	uint32_t hash = 0;
-
-	for (const auto& anim: anims) {
-		hash = spring::LiteHash(&anim, sizeof(anim), hash);
-	}
-
-	return hash;
-}
-
 static bool ReplayCheckpointDebugUnitScriptFrame()
 {
 	return (gs != nullptr && configHandler != nullptr && gs->frameNum == configHandler->GetInt("ReplayCheckpointDebugSignatureFrame"));
@@ -64,7 +52,11 @@ static bool ReplayCheckpointShouldLogUnitScript(const CUnitScript* script)
 {
 	const CUnit* unit = (script != nullptr) ? script->GetUnit() : nullptr;
 
-	return (unit != nullptr);
+	if (unit == nullptr)
+		return false;
+
+	const int debugUnitID = configHandler->GetInt("ReplayCheckpointDebugCobUnitID");
+	return (debugUnitID == -1 || unit->id == debugUnitID);
 }
 
 static void LogReplayCheckpointAnimatingState(const char* phase, const std::vector<CUnitScript*>& animating, uint32_t cs)
@@ -95,9 +87,9 @@ static void LogReplayCheckpointAnimatingState(const char* phase, const std::vect
 			(unit != nullptr) ? unit->id : -1,
 			(script != nullptr) ? script->GetAnimArrayChecksum() : 0u,
 			static_cast<unsigned int>(liveCount),
-			(script != nullptr) ? ReplayCheckpointHashAnimationVector(script->GetLiveAnims()) : 0u,
+			(script != nullptr) ? script->GetLiveAnimHash() : 0u,
 			static_cast<unsigned int>(doneCount),
-			(script != nullptr) ? ReplayCheckpointHashAnimationVector(script->GetDoneAnims()) : 0u
+			(script != nullptr) ? script->GetDoneAnimHash() : 0u
 		);
 	}
 }
@@ -202,17 +194,17 @@ void CUnitScriptEngine::Tick(int deltaTime)
 		// setting currentScript = animating[i]; is not required here, only in ST section below
 		for_mt(0, animating.size(), [&](const int i) {
 #ifdef SYNCCHECK
-			const bool replayCheckpointDebug = ReplayCheckpointDebugUnitScriptFrame();
+			const CUnitScript* debugScript = animating[i];
+			const bool replayCheckpointDebug = ReplayCheckpointDebugUnitScriptFrame() && ReplayCheckpointShouldLogUnitScript(debugScript);
 			if (replayCheckpointDebug) {
-				const CUnitScript* script = animating[i];
-				const CUnit* unit = (script != nullptr) ? script->GetUnit() : nullptr;
+				const CUnit* unit = debugScript->GetUnit();
 				LOG("[ReplayCheckpoint][unit-script-tick] before frame=%d index=%d unit=%d sync=%08x live=%u liveHash=%08x",
 					gs->frameNum,
 					i,
 					(unit != nullptr) ? unit->id : -1,
 					CSyncChecker::GetChecksum(),
-					(script != nullptr) ? static_cast<unsigned int>(script->GetLiveAnims().size()) : 0u,
-					(script != nullptr) ? ReplayCheckpointHashAnimationVector(script->GetLiveAnims()) : 0u
+					static_cast<unsigned int>(debugScript->GetLiveAnims().size()),
+					debugScript->GetLiveAnimHash()
 				);
 			}
 #endif
@@ -227,9 +219,9 @@ void CUnitScriptEngine::Tick(int deltaTime)
 					(unit != nullptr) ? unit->id : -1,
 					CSyncChecker::GetChecksum(),
 					(script != nullptr) ? static_cast<unsigned int>(script->GetLiveAnims().size()) : 0u,
-					(script != nullptr) ? ReplayCheckpointHashAnimationVector(script->GetLiveAnims()) : 0u,
+					(script != nullptr) ? script->GetLiveAnimHash() : 0u,
 					(script != nullptr) ? static_cast<unsigned int>(script->GetDoneAnims().size()) : 0u,
-					(script != nullptr) ? ReplayCheckpointHashAnimationVector(script->GetDoneAnims()) : 0u
+					(script != nullptr) ? script->GetDoneAnimHash() : 0u
 				);
 			}
 #endif
