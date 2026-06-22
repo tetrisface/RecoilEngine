@@ -4,6 +4,7 @@
 #define REPLAY_CHECKPOINT_HANDLER_H
 
 #include <string>
+#include <vector>
 
 namespace ReplayCheckpointHandler
 {
@@ -22,6 +23,7 @@ namespace ReplayCheckpointHandler
 
 	std::string GetBundleDirForDemo(const std::string& demoPath);
 	std::string MakeSaveFileName(int frame);
+	std::vector<int> GetAvailableCheckpointFrames();
 
 	void InitPlaybackContext(const std::string& demoPath);
 	void UpdateRecordingContext();

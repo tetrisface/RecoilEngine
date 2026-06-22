@@ -93,6 +93,7 @@ public:
 	void SetGamePausable(const bool arg);
 	bool IsPaused() const { return isPaused; }
 	void SetPaused(const bool paused) { isPaused = paused; }
+	void SetPausedFromReplayControl(const bool paused) { frameTimeLeft = 0.0f; isPaused = paused; }
 	void SetReloading(const bool arg) { reloadingServer = arg; }
 
 	bool PreSimFrame() const { return (serverFrameNum == -1); }

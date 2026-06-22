@@ -57,10 +57,22 @@ static std::vector<RecordedCheckpoint> recordedCheckpoints;
 static std::atomic<bool> saveInFlight = {false};
 static int lastAutoSaveFrame = -1;
 static int pendingHotLoadTargetFrame = -1;
-static bool pendingHotLoadWasSyncedPaused = false;
+static bool pendingHotLoadWasClientPaused = false;
 static bool pendingHotLoadWasServerPaused = false;
 static spring_time lastAutoSaveWallTime = spring_gettime();
 static bool sessionFinalized = false;
+
+static bool GetRestorePausedState()
+{
+	const bool clientPaused = (game != nullptr && game->IsClientPaused());
+	const bool syncedPaused = (gs != nullptr && gs->paused);
+	const bool serverPaused = (gameServer != nullptr && gameServer->IsPaused());
+
+	if (gameSetup != nullptr && gameSetup->hostDemo && gameServer != nullptr)
+		return clientPaused || serverPaused;
+
+	return syncedPaused || serverPaused;
+}
 
 static std::string EnsurePathSepAtEnd(const std::string& path)
 {
@@ -263,7 +275,7 @@ void ClearActiveContext()
 	saveInFlight = false;
 	lastAutoSaveFrame = -1;
 	pendingHotLoadTargetFrame = -1;
-	pendingHotLoadWasSyncedPaused = false;
+	pendingHotLoadWasClientPaused = false;
 	pendingHotLoadWasServerPaused = false;
 	sessionFinalized = false;
 }
@@ -304,6 +316,37 @@ CheckpointFile FindNearestCheckpoint(int targetFrame)
 	return nearest;
 }
 
+std::vector<int> GetAvailableCheckpointFrames()
+{
+	if (activeContext.mode != DemoContextMode::Playback && gameSetup != nullptr && gameSetup->hostDemo)
+		InitPlaybackContext(gameSetup->demoName);
+
+	std::vector<std::string> checkpointFiles;
+
+	if (activeContext.mode == DemoContextMode::Playback || activeContext.mode == DemoContextMode::Recording) {
+		if (activeContext.bundleDir.empty() || !FileSystem::DirExists(activeContext.bundleDir))
+			return {};
+
+		checkpointFiles = ListCheckpointFiles(activeContext.bundleDir);
+	} else {
+		checkpointFiles = dataDirsAccess.FindFiles("Saves", "replaycheckpoint_*.ssf");
+	}
+
+	std::vector<int> frames;
+	frames.reserve(checkpointFiles.size());
+
+	for (const std::string& path: checkpointFiles) {
+		int frame = -1;
+
+		if (TryParseCheckpointFrame(path, &frame))
+			frames.push_back(frame);
+	}
+
+	std::sort(frames.begin(), frames.end());
+	frames.erase(std::unique(frames.begin(), frames.end()), frames.end());
+	return frames;
+}
+
 bool QueueSaveCurrentFrame(bool overwrite)
 {
 	if (game == nullptr || gs == nullptr)
@@ -327,7 +370,7 @@ bool QueueSaveCurrentFrame(bool overwrite)
 	return saved;
 }
 
-static bool LoadFrameNow(int targetFrame)
+static bool LoadFrameNow(int targetFrame, bool restoreClientPaused, bool restoreServerPaused)
 {
 	if (targetFrame < 0)
 		return false;
@@ -373,7 +416,31 @@ static bool LoadFrameNow(int targetFrame)
 	if (gameServer != nullptr)
 		gameServer->SetPaused(true);
 
-	return game != nullptr && game->LoadReplayCheckpoint(checkpoint.path, checkpoint.frame, targetFrame);
+	const bool loaded = game != nullptr && game->LoadReplayCheckpoint(
+		checkpoint.path,
+		checkpoint.frame,
+		targetFrame,
+		restoreClientPaused,
+		restoreServerPaused
+	);
+
+	if (!loaded) {
+		if (gameSetup != nullptr && gameSetup->hostDemo) {
+			if (game != nullptr)
+				game->paused = restoreClientPaused;
+		} else if (gs != nullptr) {
+			gs->paused = restoreClientPaused;
+		}
+
+		if (gameServer != nullptr) {
+			if (gameSetup != nullptr && gameSetup->hostDemo)
+				gameServer->SetPausedFromReplayControl(restoreServerPaused);
+			else
+				gameServer->SetPaused(restoreServerPaused);
+		}
+	}
+
+	return loaded;
 }
 
 bool RequestHotLoadFrame(int targetFrame)
@@ -381,10 +448,14 @@ bool RequestHotLoadFrame(int targetFrame)
 	if (targetFrame < 0)
 		return false;
 
+	const bool restorePaused = GetRestorePausedState();
+	const bool restoreClientPaused = restorePaused;
+	const bool restoreServerPaused = restorePaused;
+
 	if (game != nullptr && game->IsProcessingSimFrame()) {
 		pendingHotLoadTargetFrame = targetFrame;
-		pendingHotLoadWasSyncedPaused = (gs != nullptr && gs->paused);
-		pendingHotLoadWasServerPaused = (gameServer != nullptr && gameServer->IsPaused());
+		pendingHotLoadWasClientPaused = restoreClientPaused;
+		pendingHotLoadWasServerPaused = restoreServerPaused;
 
 		if (gs != nullptr)
 			gs->paused = true;
@@ -396,7 +467,7 @@ bool RequestHotLoadFrame(int targetFrame)
 		return true;
 	}
 
-	return LoadFrameNow(targetFrame);
+	return LoadFrameNow(targetFrame, restoreClientPaused, restoreServerPaused);
 }
 
 bool ProcessQueuedHotLoad()
@@ -406,17 +477,25 @@ bool ProcessQueuedHotLoad()
 
 	const int targetFrame = pendingHotLoadTargetFrame;
 	pendingHotLoadTargetFrame = -1;
-	const bool loaded = LoadFrameNow(targetFrame);
+	const bool loaded = LoadFrameNow(targetFrame, pendingHotLoadWasClientPaused, pendingHotLoadWasServerPaused);
 
 	if (!loaded) {
-		if (gs != nullptr)
-			gs->paused = pendingHotLoadWasSyncedPaused;
+		if (gameSetup != nullptr && gameSetup->hostDemo) {
+			if (game != nullptr)
+				game->paused = pendingHotLoadWasClientPaused;
+		} else if (gs != nullptr) {
+			gs->paused = pendingHotLoadWasClientPaused;
+		}
 
-		if (gameServer != nullptr)
-			gameServer->SetPaused(pendingHotLoadWasServerPaused);
+		if (gameServer != nullptr) {
+			if (gameSetup != nullptr && gameSetup->hostDemo)
+				gameServer->SetPausedFromReplayControl(pendingHotLoadWasServerPaused);
+			else
+				gameServer->SetPaused(pendingHotLoadWasServerPaused);
+		}
 	}
 
-	pendingHotLoadWasSyncedPaused = false;
+	pendingHotLoadWasClientPaused = false;
 	pendingHotLoadWasServerPaused = false;
 	return loaded;
 }

@@ -159,6 +159,9 @@ CONFIG(bool, ShowClock).defaultValue(true).headlessValue(false).description("Dis
 CONFIG(bool, ShowSpeed).defaultValue(false).description("Displays current game speed.");
 CONFIG(int, ReplayCheckpointDebugDumpFrame).defaultValue(-1).description("Dump replay checkpoint debug state at this frame; -1 disables it.");
 CONFIG(int, ReplayCheckpointDebugSignatureFrame).defaultValue(-1).description("Log compact replay checkpoint state signatures at this frame; -1 disables it.");
+CONFIG(int, ReplayCheckpointRestoreSerial).defaultValue(0).description("Unsynced marker incremented after each replay checkpoint restore.");
+CONFIG(int, ReplayCheckpointRestoreFrame).defaultValue(-1).description("Last restored replay checkpoint frame; -1 means none.");
+CONFIG(int, ReplayCheckpointRestoreTargetFrame).defaultValue(-1).description("Last requested replay checkpoint target frame; -1 means none.");
 CONFIG(int, ShowPlayerInfo).defaultValue(1).headlessValue(0);
 CONFIG(float, GuiOpacity).defaultValue(0.8f).minimumValue(0.0f).maximumValue(1.0f).description("Sets the opacity of the built-in Spring UI. Generally has no effect on LuaUI widgets. Can be set in-game using shift+, to decrease and shift+. to increase.");
 CONFIG(std::string, InputTextGeo).defaultValue("");
@@ -2380,7 +2383,13 @@ void CGame::Save(std::string&& fileName, std::string&& saveArgs)
 }
 
 
-bool CGame::LoadReplayCheckpoint(const std::string& checkpointPath, int checkpointFrame, int targetFrame)
+bool CGame::LoadReplayCheckpoint(
+	const std::string& checkpointPath,
+	int checkpointFrame,
+	int targetFrame,
+	bool restoreClientPaused,
+	bool restoreServerPaused
+)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 
@@ -2427,9 +2436,6 @@ bool CGame::LoadReplayCheckpoint(const std::string& checkpointPath, int checkpoi
 
 	LocalViewerState localViewerState;
 	localViewerState.Capture();
-
-	const bool wasSyncedPaused = (gs != nullptr && gs->paused);
-	const bool wasServerPaused = (gameServer != nullptr && gameServer->IsPaused());
 
 	try {
 		CCregLoadSaveHandler loadSaveHandler;
@@ -2531,19 +2537,39 @@ bool CGame::LoadReplayCheckpoint(const std::string& checkpointPath, int checkpoi
 				LOG("[ReplayCheckpoint] dropped %u queued server packets after checkpoint restore", droppedPackets);
 		}
 
-		if (gs != nullptr)
-			gs->paused = wasSyncedPaused;
+		if (gameSetup != nullptr && gameSetup->hostDemo) {
+			paused = restoreClientPaused;
 
-		if (gameServer != nullptr)
-			gameServer->SetPaused(wasServerPaused);
+			if (gameServer != nullptr)
+				gameServer->SetPausedFromReplayControl(restoreServerPaused);
+		} else {
+			if (gs != nullptr)
+				gs->paused = restoreClientPaused;
+
+			if (gameServer != nullptr)
+				gameServer->SetPaused(restoreServerPaused);
+		}
 
 		LOG("[ReplayCheckpoint] restored checkpoint frame %d for requested frame %d, current frame %d, paused %d from %s",
 			checkpointFrame,
 			targetFrame,
 			(gs != nullptr) ? gs->frameNum : -1,
-			(gs != nullptr && gs->paused) ? 1 : 0,
+			(gameSetup != nullptr && gameSetup->hostDemo) ? (paused ? 1 : 0) : ((gs != nullptr && gs->paused) ? 1 : 0),
 			checkpointPath.c_str()
 		);
+
+		if (configHandler != nullptr) {
+			const int restoreFrame = (gs != nullptr) ? gs->frameNum : checkpointFrame;
+			const int restoreSerial = configHandler->GetIntSafe("ReplayCheckpointRestoreSerial", 0) + 1;
+			configHandler->Set("ReplayCheckpointRestoreSerial", restoreSerial, true);
+			configHandler->Set("ReplayCheckpointRestoreFrame", restoreFrame, true);
+			configHandler->Set("ReplayCheckpointRestoreTargetFrame", targetFrame, true);
+			LOG("[ReplayCheckpoint] marked restore serial %d at frame %d for requested frame %d",
+				restoreSerial,
+				restoreFrame,
+				targetFrame
+			);
+		}
 
 		if (gameSetup != nullptr && gameSetup->hostDemo && luaUI != nullptr) {
 			luaUI->QueueAction(CLuaUI::ACTION_RELOAD);
@@ -2582,11 +2608,18 @@ bool CGame::LoadReplayCheckpoint(const std::string& checkpointPath, int checkpoi
 		LOG_L(L_ERROR, "[ReplayCheckpoint] unknown error while restoring %s", checkpointPath.c_str());
 	}
 
-	if (gs != nullptr)
-		gs->paused = wasSyncedPaused;
+	if (gameSetup != nullptr && gameSetup->hostDemo) {
+		paused = restoreClientPaused;
 
-	if (gameServer != nullptr)
-		gameServer->SetPaused(wasServerPaused);
+		if (gameServer != nullptr)
+			gameServer->SetPausedFromReplayControl(restoreServerPaused);
+	} else {
+		if (gs != nullptr)
+			gs->paused = restoreClientPaused;
+
+		if (gameServer != nullptr)
+			gameServer->SetPaused(restoreServerPaused);
+	}
 
 	return false;
 }

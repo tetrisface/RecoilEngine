@@ -100,7 +100,13 @@ public:
 	void ParseInputTextGeometry(const std::string& geo);
 
 	void Save(std::string&& fileName, std::string&& saveArgs);
-	bool LoadReplayCheckpoint(const std::string& checkpointPath, int checkpointFrame, int targetFrame);
+	bool LoadReplayCheckpoint(
+		const std::string& checkpointPath,
+		int checkpointFrame,
+		int targetFrame,
+		bool restoreClientPaused,
+		bool restoreServerPaused
+	);
 
 	void ResizeEvent() override;
 

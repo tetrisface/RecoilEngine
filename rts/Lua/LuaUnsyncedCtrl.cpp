@@ -88,6 +88,7 @@
 #include "System/FileSystem/FileHandler.h"
 #include "System/FileSystem/DataDirLocater.h"
 #include "System/FileSystem/FileSystem.h"
+#include "System/LoadSave/ReplayCheckpointHandler.h"
 #include "System/Platform/Watchdog.h"
 #include "System/Platform/WindowManagerHelper.h"
 #include "System/SpringHash.h"
@@ -242,6 +243,9 @@ bool LuaUnsyncedCtrl::PushEntries(lua_State* L)
 
 	REGISTER_LUA_CFUNC(CreateDir);
 
+	REGISTER_LUA_CFUNC(SetReplayPaused);
+	REGISTER_LUA_CFUNC(GetReplayCheckpoints);
+	REGISTER_LUA_CFUNC(LoadReplayCheckpoint);
 	REGISTER_LUA_CFUNC(SendCommands);
 	REGISTER_LUA_CFUNC(GiveOrder);
 	REGISTER_LUA_CFUNC(GiveOrderToUnit);
@@ -549,6 +553,62 @@ int LuaUnsyncedCtrl::SendCommands(lua_State* L)
 	guihandler->RunCustomCommands(cmds, false);
 	configHandler->EnableWriting(true);
 	return 0;
+}
+
+/***
+ * @function Spring.SetReplayPaused
+ * @param paused boolean
+ * @return boolean accepted
+ */
+int LuaUnsyncedCtrl::SetReplayPaused(lua_State* L)
+{
+	const bool paused = luaL_checkboolean(L, 1);
+
+	if (game == nullptr || gameServer == nullptr || gameServer->GetDemoReader() == nullptr) {
+		lua_pushboolean(L, false);
+		return 1;
+	}
+
+	game->paused = paused;
+	gameServer->SetPausedFromReplayControl(paused);
+
+	LOG("[ReplayCheckpoint] LuaUI set replay pause state to %d", paused ? 1 : 0);
+
+	lua_pushboolean(L, true);
+	return 1;
+}
+
+/***
+ * @function Spring.GetReplayCheckpoints
+ * @return integer[] frames
+ */
+int LuaUnsyncedCtrl::GetReplayCheckpoints(lua_State* L)
+{
+	const std::vector<int> frames = ReplayCheckpointHandler::GetAvailableCheckpointFrames();
+
+	lua_createtable(L, static_cast<int>(frames.size()), 0);
+	for (size_t i = 0; i < frames.size(); ++i) {
+		lua_pushnumber(L, frames[i]);
+		lua_rawseti(L, -2, i + 1);
+	}
+
+	return 1;
+}
+
+/***
+ * @function Spring.LoadReplayCheckpoint
+ * @param frame integer
+ * @return boolean accepted
+ */
+int LuaUnsyncedCtrl::LoadReplayCheckpoint(lua_State* L)
+{
+	const int targetFrame = luaL_checkint(L, 1);
+
+	if (targetFrame < 0)
+		return luaL_error(L, "Invalid replay checkpoint frame %d", targetFrame);
+
+	lua_pushboolean(L, ReplayCheckpointHandler::RequestHotLoadFrame(targetFrame));
+	return 1;
 }
 
 

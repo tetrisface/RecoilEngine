@@ -163,6 +163,9 @@ class LuaUnsyncedCtrl {
 
 		static int SetCameraOffset(lua_State* L);
 
+		static int SetReplayPaused(lua_State* L);
+		static int GetReplayCheckpoints(lua_State* L);
+		static int LoadReplayCheckpoint(lua_State* L);
 		static int SendCommands(lua_State* L);
 
 		static int SetShareLevel(lua_State* L);
