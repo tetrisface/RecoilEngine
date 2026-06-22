@@ -7,6 +7,17 @@ engine shape requires smoke tests before smaller unit tests are practical.
 Upstream design context and source links are summarized in
 [`replay-checkpoint-upstream-notes.md`](replay-checkpoint-upstream-notes.md).
 
+## Restart Cleanup 2026-06-22
+
+The active branch now targets Timeline Core: checkpoint-owned forward/backward
+jumps, pause preservation, bounded catch-up, checkpoint tick marks, and
+SYNCCHECK/sync-hash equivalence. BAR transition overlays, screenshot automation,
+GUI-shader/range cleanup windows, and broader unsynced visual cleanup
+experiments were archived on
+`replay-archive/2026-06-22-unsynced-gui-experiments` at `d3445bd20d20`. Older
+regression entries that mention those systems remain useful historical evidence,
+but they are not active acceptance gates.
+
 ## Acceptance Invariant
 
 For a deterministic SYNCCHECK replay with checkpoint bundle:
@@ -909,6 +920,644 @@ Verified evidence:
   `test_QTPFSPathState.exe --success`: 114 assertions in 2 test cases. The full
   Windows SYNCCHECK compile-only build exited `0` after adding
   `PathReplayCheckpointState.cpp` to `engineSim`.
+
+### Checkpoint-Owned Forward Timeline Jump And Replay Pause Preservation
+
+Bug shapes:
+
+- BAR replay timeline forward clicks still used direct `skip f<target>`, so the
+  visual timeline could move forward only through the old speedup/skip path
+  instead of the same checkpoint-owned jump path as rewind.
+- The checkpoint self-test queued `pause 1` and `replaycheckpoint load` together.
+  In hosted-demo replay mode, the visible "paused the demo" state is owned by
+  local replay pause state, not by synced `gs->paused`. Capturing only
+  `gs->paused` made the engine restore marker report `paused 0` even though the
+  demo was functionally paused; writing replay pause back into `gs->paused`
+  later caused real post-resume desync.
+- Restore/load can take long enough that a demo needs an intentional transition,
+  but that transition must stay unsynced and configurable so it cannot pollute
+  SYNCCHECK acceptance evidence.
+
+Fixes:
+
+- Manual BAR timeline clicks now prefer `Spring.LoadReplayCheckpoint(target)`
+  when `ReplayTimelineCheckpointJumps=1` (default), with
+  `/replaycheckpoint load <target>` only as a temporary fallback. The remaining
+  advance is bounded to the selected checkpoint interval.
+  `ReplayTimelineSelfTestUseCheckpoint=1` makes the timeline smoke exercise
+  that same path by default, while `-LegacySkipSelfTest` keeps old `skip`
+  behavior available as a separate baseline.
+- `ReplayCheckpointHandler` captures a single replay-pause intent. Hosted-demo
+  restore preserves `CGame::paused` and `GameServer::isPaused`; non-demo load
+  paths still restore synced/server pause. `gs->paused` remains checkpoint-owned
+  for hosted-demo replays.
+- The BAR replay pause button now routes through the same
+  `Spring.SetReplayPaused` helper used by pause-before-jump and paused catch-up,
+  with the old `pause 0/1` command only as a fallback. This keeps manual
+  pause-then-jump ownership aligned with the tested replay-pause seam.
+- The checkpoint self-test now has `ReplayCheckpointSelfTestPauseBeforeLoad`.
+  The paused path waits a short wall-clock beat after requesting pause before
+  issuing `replaycheckpoint load`; the unpaused path intentionally sends no
+  pause command before load or resume because hosted demo `pause 0` can toggle
+  the replay into paused state. The engine restore marker and post-restore
+  SYNCCHECK equivalence are the authority.
+- The BAR timeline self-test now has `ReplayTimelineSelfTestPauseBeforeJump`
+  and `ExpectedRestorePaused` coverage for the real UI jump path. Dispatch is
+  driven from `DrawScreen` as well as `Update` so a paused replay still issues
+  the checkpoint load, and the post-restore widget owns the final
+  reached/screenshot/quit markers by requiring a new restore serial at widget
+  load.
+- BAR LuaUI starts a gated unsynced restore transition for manual checkpoint
+  timeline jumps. It is controlled by `ReplayCheckpointTransition`, persists
+  target/request timing plus a frame fallback through config so it can survive
+  LuaUI reload, and uses DrawScreen-deferred screenshot capture for restored
+  frames. Smoke configs disable it unless transition evidence is requested.
+  `ReplayCheckpointTransitionPreloadMs/PreloadDraws` are opt-in only and
+  default to `0`, because delaying checkpoint load can let the source replay
+  frame advance before restore.
+- `scripts/replay-timeline-demo-windows.ps1` now writes unique manual-demo
+  evidence dirs and explicit checkpoint config when `-SpringExe` is supplied:
+  checkpoint timeline jumps and bundle use are enabled, transition is enabled
+  unless `-NoTransition`, preload delay is disabled, visual cleanup windows are
+  explicit, and stale transition/pause-catchup state starts at zero. It waits
+  for the engine process to exit before reading `infolog.txt`, prints a
+  checkpoint/transition/checkpoint-marker/API summary, rejects
+  `[ReplayTimelinePausedCatchup] failed`, and `-RequireCheckpointJump`,
+  `-RequireCheckpointApi`, and `-RequireCheckpointMarkers` make the summary a
+  failing evidence gate.
+
+Verified evidence:
+
+- Build: `.\scripts\build-recoil-synccheck-windows.ps1 -CompileOnly` exited
+  `0` after the pause-owner helper change.
+- Fixture `.cache/replay-timeline-synctest/run_20260611_002746`, duration
+  `1500`, recorded digest `uQ0WvLU2pI3qQoUu+9aJGA==` for `0..1499`, bundle
+  `write_episode_0/demos/rcp_e9b98e5e.replay-checkpoints`.
+- Forward checkpoint smoke:
+  `.\scripts\replay-checkpoint-smoke-windows.ps1 -RunDir .\.cache\replay-timeline-synctest\run_20260611_002746 -SpringExe .\RecoilEngine\build-windows\install\spring.exe -SaveFrame 90 -LoadFrame 30 -TargetFrame 1200 -ResumeFrame 1501 -RequireSyncChecksumRestore -RequirePostRestoreSyncHash -RequireSynctestMarkers -TimeoutSeconds 360 -RestoreTimeoutSeconds 30`.
+- Result restored request frame `30`, target frame `1200`, checkpoint frame
+  `1170`, current frame `1170`, `paused=1`, and bounded catch-up span `30`.
+  It resumed to frame `1501` with `paused=0`.
+- Post-restore sync hash `WhPFMVwjoF/c0wdwHRYjHw==` covered frames
+  `1170..1499` and matched the recorded replay. Evidence log:
+  `.cache/replay-checkpoint-smoke/run_20260611_002746/write/infolog.txt`.
+- After adding the LuaUI transition seam, `luac -p` passed for
+  `luaui/Widgets/gui_replaybuttons.lua` and `luarules/gadgets/dbg_synctest.lua`;
+  the same forward checkpoint smoke passed again with the transition disabled.
+- Transition-enabled visual smoke:
+  `.\scripts\replay-checkpoint-smoke-windows.ps1 -RunDir .\.cache\replay-timeline-synctest\run_20260610_223907 -SpringExe .\RecoilEngine\build-windows\install\spring.exe -SaveFrame 90 -LoadFrame 390 -TargetFrame 180 -ResumeFrame 600 -RequireSyncChecksumRestore -RequireSynctestMarkers -CaptureScreenshots -EnableTransition -OutputSuffix transition_default_hold_20260611 -TimeoutSeconds 240 -RestoreTimeoutSeconds 120`.
+  Evidence log:
+  `.cache/replay-checkpoint-smoke/run_20260610_223907_transition_default_hold_20260611/write/infolog.txt`.
+  It required `[ReplayCheckpointTransition] start`, restored `390 -> 180`,
+  captured deferred `restored`/`resume-start` screenshots at restored frame
+  `180`, logged `resume-deferred` before unpausing, skipped `1500` saved
+  decals, resumed to `600` with `paused=0`, and found no
+  desync/checksum-mismatch patterns.
+- BAR timeline transition visual smoke:
+  `.\scripts\replay-timeline-smoke-windows.ps1 -RunDir .\.cache\replay-timeline-synctest\run_20260610_223907 -SpringExe .\RecoilEngine\build-windows\install\spring.exe -StartFrame 390 -TargetFrame 180 -QuitFrame 210 -CaptureScreenshots -EnableTransition -RequireCheckpointRestore -RequireCheckpointApi -OutputSuffix timeline_transition_visual_api_20260611 -TimeoutSeconds 420`.
+  Evidence log:
+  `.cache/replay-timeline-smoke/run_20260610_223907_timeline_transition_visual_api_20260611/write/infolog.txt`
+  plus screenshots in that run's `write/screenshots/`. This proves the real
+  BAR timeline jump path can enable the gated time-machine overlay while still
+  using `Spring.LoadReplayCheckpoint(180)`: transition start `target=180
+  request=390`, API load accepted, checkpoint `180`, `0` catch-up, no command
+  fallback, and GUI Shader `rects=0` at reached/post-target. The
+  reached/post-target screenshots visibly show `TIME MACHINE ONLINE`, keep the
+  raised timeline visible, and do not show the old full-screen sheets or
+  imploding restore geometry. This is visual/demo evidence; SYNCCHECK authority
+  remains with the long visual+sync runs.
+- Unpaused forward checkpoint smoke:
+  `.\scripts\replay-checkpoint-smoke-windows.ps1 -RunDir .\.cache\replay-timeline-synctest\run_20260611_002746 -SpringExe .\RecoilEngine\build-windows\install\spring.exe -SaveFrame 90 -LoadFrame 30 -TargetFrame 1200 -ResumeFrame 1501 -RequireSyncChecksumRestore -RequirePostRestoreSyncHash -RequireSynctestMarkers -RestoreUnpaused -TimeoutSeconds 360 -RestoreTimeoutSeconds 30`.
+- Result restored request frame `37`, target frame `1200`, checkpoint frame
+  `1170`, engine frame `1170`, current frame `1171`, `paused=0`, bounded
+  catch-up span `30`, and resumed to frame `1501` with `paused=0`. The same
+  digest `WhPFMVwjoF/c0wdwHRYjHw==` matched for `1170..1499`. Evidence log:
+  `.cache/replay-checkpoint-smoke/run_20260611_002746_unpaused/write/infolog.txt`.
+- After the visual-cleanup fixes, the same unpaused smoke passed again. The log
+  shows the engine cleanup marker at frame `1170`, `DecalsGL4` skipped `15`
+  saved decals during the cleanup window, and the previous `Unit Repeat Icons`
+  stale `UnitID` call-in plus `Ecostats` nil-rect `DrawScreen` failure are no
+  longer present.
+- Forward BAR timeline checkpoint smoke:
+  `.\scripts\replay-timeline-smoke-windows.ps1 -RunDir .\.cache\replay-timeline-synctest\run_20260611_002746 -SpringExe .\RecoilEngine\build-windows\install\spring.exe -StartFrame 30 -TargetFrame 1200 -QuitFrame 1501 -RequireSynctestMarkers -RequireSyncHash -OutputSuffix timeline_forward_cp_20260611 -TimeoutSeconds 420`.
+  It logged `[ReplayTimelineTest] checkpoint-request`, resolved target `1200`
+  to checkpoint `1170`, rejected `skip-request`, and matched digest
+  `WhPFMVwjoF/c0wdwHRYjHw==` for frames `1170..1499`.
+- After the transition dispatch refactor, the same forward BAR timeline path
+  passed again with transition disabled:
+  `.cache/replay-timeline-smoke/run_20260611_002746_timeline_forward_cp_after_transition_queue_20260611/write/infolog.txt`.
+  It preserved the `1200 -> 1170` checkpoint resolution, `30`-frame catch-up,
+  and digest `WhPFMVwjoF/c0wdwHRYjHw==`.
+- The matching backward BAR timeline path also passed after the dispatch
+  refactor:
+  `.cache/replay-timeline-smoke/run_20260610_223907_timeline_backward_cp_after_transition_queue_20260611/write/infolog.txt`.
+  It preserved the `390 -> 180` request, checkpoint `180`, `0`-frame
+  catch-up, and digest `YYyR2AD+hpZsXxod+hQ4nA==`.
+- Manual demo launcher required-jump smoke:
+  `.\scripts\replay-timeline-demo-windows.ps1 -RunDir .\.cache\replay-timeline-synctest\run_20260610_223907 -SpringExe .\RecoilEngine\build-windows\install\spring.exe -QuitFrame 180 -OutputSuffix demo_launcher_require_jump_wait_20260611 -WindowWidth 1280 -WindowHeight 720 -RequireCheckpointJump`.
+  The log
+  `.cache/replay-timeline-synctest/run_20260610_223907/replay_timeline_demo_write_demo_launcher_require_jump_wait_20260611/infolog.txt`
+  validates launcher wiring and the post-run evidence gate: the report counted
+  `selftest_checkpoint_requests=1`, `restore_resolutions=1`,
+  `restored_checkpoints=1`, `transition_starts=1`, `skip_requests=0`,
+  `desync_or_mismatch_patterns=0`, and `max_catchup_span=0`; target `180`
+  restored to checkpoint `180`, sync-check checksum `31d9f94b` restored, and
+  `759` saved decals were skipped during cleanup. This is launcher evidence,
+  not a substitute for the final hand-click demo.
+- After the GUI Shader cleanup and stricter launcher evidence parser, the same
+  launcher gate passed with
+  `-OutputSuffix demo_launcher_evidence_parser_20260611`. The summary counted
+  `selftest_checkpoint_requests=1`, `restore_resolutions=1`,
+  `restored_checkpoints=1`, `transition_starts=1`,
+  `guishader_cleanups=1`, `skip_requests=0`,
+  `desync_or_mismatch_patterns=0`, `lua_error_patterns=0`, and
+  `max_catchup_span=0`; target `180` restored to checkpoint `180`.
+- The launcher evidence parser now has a synthetic validation seam: a good log
+  with checkpoint request, restore resolution, restored marker, transition
+  start/draw, checkpoint marker load, API load, and GUI Shader cleanup is
+  accepted, while a log containing `[ReplayTimelinePausedCatchup] failed` is
+  rejected. This validates the manual-demo evidence gate without opening an
+  interactive demo window.
+- Backward BAR timeline checkpoint smoke:
+  `.\scripts\replay-timeline-smoke-windows.ps1 -RunDir .\.cache\replay-timeline-synctest\run_20260610_223907 -SpringExe .\RecoilEngine\build-windows\install\spring.exe -StartFrame 390 -TargetFrame 180 -QuitFrame 3001 -RequireSynctestMarkers -RequireSyncHash -OutputSuffix timeline_backward_cp_20260611 -TimeoutSeconds 900`.
+  It resolved target `180` to checkpoint `180`, caught up `0` frames, and
+  matched digest `YYyR2AD+hpZsXxod+hQ4nA==` for frames `180..2999`.
+- Paused BAR timeline checkpoint smoke:
+  `.\scripts\replay-timeline-smoke-windows.ps1 -RunDir .\.cache\replay-timeline-synctest\run_20260610_223907 -SpringExe .\RecoilEngine\build-windows\install\spring.exe -StartFrame 390 -TargetFrame 180 -QuitFrame 180 -CaptureScreenshots -RequireCheckpointRestore -PauseBeforeJump -ExpectedRestorePaused 1 -OutputSuffix timeline_backward_paused_restore_serialguard_20260611 -TimeoutSeconds 360`.
+  Evidence log
+  `.cache/replay-timeline-smoke/run_20260610_223907_timeline_backward_paused_restore_serialguard_20260611/write/infolog.txt`
+  shows the UI path requested pause, dispatched a checkpoint jump, restored
+  checkpoint `180`, and reported `paused=1` in both the engine restore marker
+  and timeline reached marker. It saved `before-jump`/`reached` screenshots, and
+  the reached capture stayed visibly paused without the old magenta/green sheet
+  artifacts. Earlier paused harness attempts exposed two race shapes: `Update`
+  alone did not reliably run while paused, and the pre-reload widget could mark
+  `reached` before losing pending screenshot/quit state across LuaUI reload.
+  This run is pause-invariant evidence; long forward/backward SYNCCHECK smokes
+  remain the sync authority.
+- Unpaused BAR timeline checkpoint smoke:
+  `.\scripts\replay-timeline-smoke-windows.ps1 -RunDir .\.cache\replay-timeline-synctest\run_20260610_223907 -SpringExe .\RecoilEngine\build-windows\install\spring.exe -StartFrame 30 -TargetFrame 1200 -QuitFrame 1200 -CaptureScreenshots -RequireCheckpointRestore -ExpectedRestorePaused 0 -OutputSuffix timeline_forward_unpaused_state_summary_20260611 -TimeoutSeconds 420`.
+  Evidence log
+  `.cache/replay-timeline-smoke/run_20260610_223907_timeline_forward_unpaused_state_summary_20260611/write/infolog.txt`
+  shows checkpoint request `30 -> 1200`, restored checkpoint `1170`, bounded
+  catch-up `30`, engine restore `paused=0`, timeline reached `paused=0`, no
+  legacy skip request, and GUI Shader `rects=0` at the reached screenshot. This
+  proves the current marker/harness covers the unpaused half of the pause
+  invariant; the long forward visual+SYNCCHECK run remains the sync authority.
+- Paused forward resume exposed the replay/synced-pause ownership bug:
+  `.cache/replay-timeline-smoke/run_20260610_223907_timeline_forward_paused_resume_api_sync_20260611/write/infolog.txt`
+  restored `390 -> 1200` through checkpoint `1170`, reached the paused target,
+  then desynced after `resume-after-reached`. First warning was at frame `1260`;
+  post-restore digest was `bcyEXP3hxUKUfYopF3sKJg==`. This was not a visual-only
+  issue: the bug was preserving replay pause by mutating synced `gs->paused`.
+- Current paused forward API evidence after the ownership fix and precise
+  catch-up state machine:
+  `.cache/replay-timeline-smoke/run_20260610_223907_timeline_forward_paused_resume_precise_catchup_sync_20260611/write/infolog.txt`.
+  BAR used `Spring.LoadReplayCheckpoint(1200)`, resolved checkpoint `1170`,
+  prepared catch-up speed while still paused, caught up exactly `1170 -> 1200`,
+  restored the previous replay speed, reached `current=1200 target=1200
+  paused=1`, resumed at `1200`, and matched digest
+  `oh6rmUltongIJMqlhqyPRg==` for frames `1170..2999`. Screenshots are visually
+  clean and keep the timeline visible.
+- The timeline smoke verifier now rejects paused frame drift instead of allowing
+  a small tolerance. Fresh strict runs:
+  `.cache/replay-timeline-smoke/run_20260610_223907_timeline_forward_paused_resume_exact_assert_3001_20260611/write/infolog.txt`
+  and
+  `.cache/replay-timeline-smoke/run_20260610_223907_timeline_backward_paused_resume_exact_assert_20260611/write/infolog.txt`
+  both used the Lua API, preserved `paused=1`, reached and resumed at the exact
+  targets (`1200` and `180`), and matched digests
+  `oh6rmUltongIJMqlhqyPRg==` (`1170..2999`) and
+  `YYyR2AD+hpZsXxod+hQ4nA==` (`180..2999`). A same-path forward run with
+  `QuitFrame 3000` reached/resumed exactly but failed the harness because the
+  SYNCCHECK end marker needed frame `3001`; use `QuitFrame 3001` for full-run
+  timeline digest proof on this fixture.
+
+### LuaUI Visual Cleanup After Restore
+
+Bug shapes:
+
+- Restoring a checkpoint reloads unsynced LuaUI, but widget-local VBOs,
+  render-to-texture state, and saved visual caches can still refer to the
+  pre-restore world.
+- `gfx_decals_gl4.lua` restored saved decals after checkpoint restore, which
+  matched the user-reported "imploding" and sheet-like visual corruption risk.
+- `gui_unit_repeat_icon.lua` handled a stale `UnitCommand` for non-existing unit
+  `31719`, then called into VBO instance data paths that queried the missing
+  unit and removed the widget.
+- `gui_ecostats.lua` could keep `uiTex`/`uiBgTex` while `areaRect` was empty,
+  then call `gl.TexRect(nil, ...)` from `DrawScreen`.
+- `gfx_guishader.lua` could keep or quickly re-register large blur masks while
+  LuaUI was still settling after restore. The short timeline screenshot smoke
+  showed stale blurred minimap/player-list rectangles even after the magenta
+  sheet and decal corruption were gone.
+- `gui_defenserange_gl4.lua` and `gui_attackrange_gl4.lua` could rebuild large
+  stencil-filled range VBOs immediately after checkpoint restore. On the old
+  visual fixture this looked like magenta/orange/green sheets and imploding
+  geometry after the jump; guarding only the sensor-range widgets did not fix
+  it, so the owner was the range-ring GL4 state rather than the sensor stencils
+  alone.
+
+Fixes:
+
+- `CGame::LoadReplayCheckpoint()` now emits a narrow unsynced cleanup marker:
+  `ReplayCheckpointRestoreSerial`, restore/request frames, and
+  `ReplayCheckpointVisualCleanupUntilFrame`. The engine does not own widget
+  cleanup policy.
+- `gfx_decals_gl4.lua` skips restoring saved decals while the cleanup marker is
+  active.
+- `gui_unit_repeat_icon.lua` clears repeat-icon VBO state once per restore
+  serial and ignores stale unit visibility/command callbacks during the cleanup
+  window. Invalid units are forgotten in Lua tables without popping a VBO
+  instance that may query stale engine unit data, then visible units are
+  refreshed from `WG.unittrackerapi` after the cleanup window closes.
+- `gui_ecostats.lua` validates `areaRect` before render-to-texture and screen
+  blending calls.
+- `gfx_guishader.lua` now clears and suppresses blur rect/dlist state during a
+  BAR-local cleanup window after replay checkpoint restore. The window is
+  configurable through `ReplayCheckpointGuishaderCleanupFrames` and defaults to
+  `90` frames; smoke/demo configs set it explicitly.
+- `gui_defenserange_gl4.lua` and `gui_attackrange_gl4.lua` now clear their VBO
+  instance tables and suppress range drawing/callback rebuilds once per restore
+  serial during `ReplayCheckpointRangeCleanupFrames` (default `300` frames).
+  Defense ranges rebuild from `WG.unittrackerapi` after the range cleanup
+  window closes; attack ranges queue a normal selection refresh. The sensor
+  range widgets also skip restore-window rebuilds, but that was not sufficient
+  by itself.
+- The smoke harness keeps the engine checkpoint-frame assertion strict, but
+  allows a small LuaUI-observed frame tolerance for `-RestoreUnpaused`, where
+  the simulation intentionally continues while LuaUI sees the restore marker.
+
+Verified evidence:
+
+- `luac -p` passed for `gui_unit_repeat_icon.lua`, `gui_ecostats.lua`,
+  `gfx_decals_gl4.lua`, `gui_replaybuttons.lua`, and `dbg_synctest.lua`.
+- `git diff --check` passed for the BAR, Recoil, script, and docs changes
+  aside from expected CRLF warnings.
+- Unpaused smoke
+  `.cache/replay-checkpoint-smoke/run_20260611_002746_unpaused/write/infolog.txt`
+  restored to checkpoint `1170`, resumed to `1501`, preserved `paused=0`, and
+  matched digest `WhPFMVwjoF/c0wdwHRYjHw==` for `1170..1499`.
+- Focused log scan found the cleanup marker and Decals skip, with no
+  `LuaUI::RunCallInTraceback`, `LUA_ERRRUN`, `Error in UnitCommand`,
+  `Non-existing UnitID`, `Error in DrawScreen`, or widget removal for
+  Unit Repeat Icons/Ecostats after restore.
+- Screenshot smoke on the original visual-regression fixture
+  `.cache/replay-timeline-synctest/run_20260610_223907` restored request `390`
+  to checkpoint `180`, preserved `paused=1`, skipped `1500` saved `DecalsGL4`
+  decals, resumed to frame `3001` with `paused=0`, and matched digest
+  `YYyR2AD+hpZsXxod+hQ4nA==` for frames `180..2999`. Evidence log:
+  `.cache/replay-checkpoint-smoke/run_20260610_223907_fullhash_20260611/write/infolog.txt`.
+  A focused negative scan found no LuaUI/LuaRules traceback, stale `UnitID`,
+  `UnitCommand`, `DrawScreen`, widget-removal, desync, or checksum-mismatch
+  patterns.
+- `-CaptureScreenshots` saved `before-load`, `restored`, `resume-start`, and
+  `resumed` images under
+  `.cache/replay-checkpoint-smoke/run_20260610_223907_fullhash_20260611/write/screenshots/`.
+  Against the six old glitch screenshots, sampled max magenta/green coverage
+  dropped from `15.015%`/`24.442%` to `0.008%`/`0.103%` on the new captures.
+- Transition overlay screenshots under
+  `.cache/replay-checkpoint-smoke/run_20260610_223907_transition_default_hold_20260611/write/screenshots/`
+  visibly show the `TIME MACHINE ONLINE` overlay and timeline at restored frame
+  `180`;
+  sampled magenta/green coverage on those overlay captures was
+  `0.000%`/`0.030%`.
+- Short timeline visual smoke after the guishader cleanup fix:
+  `.\scripts\replay-timeline-smoke-windows.ps1 -RunDir .\.cache\replay-timeline-synctest\run_20260610_223907 -SpringExe .\RecoilEngine\build-windows\install\spring.exe -StartFrame 175 -TargetFrame 180 -QuitFrame 210 -CaptureScreenshots -OutputSuffix timeline_visual_guishader_check_20260611 -TimeoutSeconds 300`.
+  The updated verifier required the `[GUI Shader] Cleared blur state after
+  replay checkpoint restore` marker, restored target `180` to checkpoint `180`,
+  caught up `0` frames, rejected the legacy skip path, and saved three
+  screenshots under
+  `.cache/replay-timeline-smoke/run_20260610_223907_timeline_visual_guishader_check_20260611/write/screenshots/`.
+  The `reached` and `post-target` captures no longer show the stale blurred
+  rectangles from the previous short visual smoke. This is visual regression
+  evidence only; the full `fullhash_20260611` smoke remains the SYNCCHECK
+  authority.
+- Full BAR timeline visual+SYNCCHECK smoke:
+  `.\scripts\replay-timeline-smoke-windows.ps1 -RunDir .\.cache\replay-timeline-synctest\run_20260610_223907 -SpringExe .\RecoilEngine\build-windows\install\spring.exe -StartFrame 390 -TargetFrame 180 -QuitFrame 3001 -CaptureScreenshots -RequireSynctestMarkers -RequireSyncHash -OutputSuffix timeline_backward_visual_sync_20260611 -TimeoutSeconds 900`.
+  Evidence log
+  `.cache/replay-timeline-smoke/run_20260610_223907_timeline_backward_visual_sync_20260611/write/infolog.txt`
+  shows a UI checkpoint request at frame `390`, target `180` resolved to
+  checkpoint `180`, `0` catch-up frames, no legacy skip request, GUI Shader
+  cleanup through frame `270`, and digest
+  `YYyR2AD+hpZsXxod+hQ4nA==` for frames `180..2999`. The `reached` screenshot
+  at frame `188` keeps the timeline visible and is clear of the old
+  magenta/green sheets, imploding visual state, and stale blurred UI panels.
+- Late endgame overlay attribution and fix:
+  `timeline_guishader_debug_20260611` added a gated
+  `ReplayCheckpointGuishaderDebug` dump at screenshot capture time. At
+  `timeline-post-target` it reported `rects=1:awards`, proving the large center
+  blur was BAR `gui_awards.lua` endgame UI, not restore corruption.
+  `ReplayTimelineSuppressEndAwards=1` now suppresses awards during replay
+  timeline screenshot smoke and `gui_awards.lua` removes the `awards` rect
+  whenever awards are not drawn. Follow-up
+  `timeline_awards_suppressed_20260611` passed with `rects=0` at
+  `timeline-post-target`; the screenshot no longer has the big center blur and
+  `replay-timeline-smoke-windows.ps1` now rejects a post-target `awards` rect.
+- Final combined backward BAR timeline visual+SYNCCHECK smoke after awards
+  suppression:
+  `.cache/replay-timeline-smoke/run_20260610_223907_timeline_backward_visual_sync_after_awards_20260611/write/infolog.txt`.
+  This supersedes the earlier split evidence for the backward UI path: it
+  requested checkpoint restore `390 -> 180`, restored checkpoint `180`, caught
+  up `0` frames, rejected legacy skip, cleaned GUI Shader state through frame
+  `270`, kept the timeline visible in screenshots, removed the late `awards`
+  rect (`rects=0` at `timeline-post-target`), and matched digest
+  `YYyR2AD+hpZsXxod+hQ4nA==` for frames `180..2999`.
+- Final combined forward BAR timeline visual+SYNCCHECK smoke on the same
+  fixture:
+  `.cache/replay-timeline-smoke/run_20260610_223907_timeline_forward_visual_sync_after_awards_20260611/write/infolog.txt`.
+  This proves the forward UI path no longer depends on direct replay skip:
+  checkpoint request `30 -> 1200`, restored checkpoint `1170`, bounded catch-up
+  `30` frames, no legacy skip, GUI Shader cleanup through frame `1260`,
+  `rects=0` at both `timeline-reached` and `timeline-post-target`, visible
+  timeline screenshots without the old sheet artifacts or late awards blur, and
+  digest `oh6rmUltongIJMqlhqyPRg==` for frames `1170..2999`.
+- API-gated full forward BAR timeline visual+SYNCCHECK smoke:
+  `.cache/replay-timeline-smoke/run_20260610_223907_timeline_forward_visual_sync_api_20260611/write/infolog.txt`.
+  This proves the new Lua API path for forward UI jumps: `api-load target=1200
+  accepted=1`, no `command-load` fallback, checkpoint `1170`, bounded catch-up
+  `30`, timeline reached `1200` with `paused=0`, `rects=0` at reached and
+  post-target GUI Shader dumps, and digest `oh6rmUltongIJMqlhqyPRg==` for
+  frames `1170..2999`.
+- API-gated full backward BAR timeline visual+SYNCCHECK smoke:
+  `.cache/replay-timeline-smoke/run_20260610_223907_timeline_backward_visual_sync_api_20260611/write/infolog.txt`.
+  This proves the same Lua API path for rewind: `api-load target=180 accepted=1`,
+  no `command-load` fallback, checkpoint `180`, bounded catch-up `0`, reached
+  the target window with `paused=0`, `rects=0` at reached and post-target GUI
+  Shader dumps, and digest `YYyR2AD+hpZsXxod+hQ4nA==` for frames `180..2999`.
+- Manual-button pause seam smoke:
+  `.cache/replay-timeline-smoke/run_20260610_223907_timeline_pause_button_seam_20260611/write/infolog.txt`.
+  `ReplayTimelineSelfTestPauseViaButton=1` routes pause-before-jump through the
+  same helper used by the BAR replay pause button. The run logged
+  `pause-api source=manual-button paused=1 accepted=1`, used
+  `api-load target=180 accepted=1`, restored checkpoint `180`, reached
+  `current=180 target=180 paused=1`, and resumed from that same target frame.
+  This is pause-button ownership evidence; the full visual+SYNCCHECK runs above
+  remain the replay-equivalence authority.
+- Full forward manual-button pause + SYNCCHECK smoke:
+  `.cache/replay-timeline-smoke/run_20260610_223907_timeline_forward_pause_button_exact_sync_20260611/write/infolog.txt`.
+  Command shape:
+  `-StartFrame 390 -TargetFrame 1200 -QuitFrame 3001 -RequireCheckpointRestore -RequireCheckpointApi -RequireSynctestMarkers -RequireSyncHash -PauseBeforeJump -PauseViaButton -ResumeAfterReached -ExpectedRestorePaused 1`.
+  It logged `pause-api source=manual-button paused=1 accepted=1`, resolved
+  target `1200` to checkpoint `1170`, used `api-load target=1200 accepted=1`,
+  prepared and ran bounded catch-up `1170 -> 1200` (`span=30`), reached and
+  resumed at exact `current=1200 target=1200 paused=1`, and matched digest
+  `oh6rmUltongIJMqlhqyPRg==` for frames `1170..2999`.
+- The checkpoint and timeline smoke verifiers now reject the explicit failure
+  families named by the active goal: `DESYNC WARNING`, sync-hash mismatch,
+  replay/checksum mismatch, sync errors, keyframe differences, LuaRules/LuaUI
+  call-in failures, DrawScreen/UnitCommand errors, and stale
+  `Non-existing UnitID` restore errors. Timeline smoke also rejects checkpoint
+  resolutions after the requested frame, so the selected checkpoint must be at
+  or before the target before any catch-up span is accepted. This is harness
+  coverage for future runs; the evidence above remains the current sync/visual
+  authority.
+- Harness rerun evidence for the new checkpoint-at-or-before-target gate:
+  `.cache/replay-timeline-smoke/run_20260610_223907_timeline_api_hardened_checkpoint_gate_20260611/write/infolog.txt`.
+  The BAR timeline self-test required the Lua API, transition, screenshots, and
+  checkpoint restore for `390 -> 180`; it resolved checkpoint `180`, used
+  `api-load target=180 accepted=1`, made no `skip-request` or `command-load`
+  fallback, reported catch-up span `0`, had GUI Shader `rects=0` at reached and
+  post-target, and captured the raised timeline plus `TIME MACHINE ONLINE`
+  overlay. This is visual/API verifier evidence, not final SYNCCHECK authority,
+  because the old visual fixture still carries the known archive-copy warning.
+- Focused no-transition visual smoke on the old glitch fixture showed the
+  sensor-range-only cleanup was insufficient, then the range-GL4 cleanup removed
+  the broken sheets:
+  `.cache/replay-timeline-smoke/run_20260610_223907_timeline_visual_cleanup_range_owner_20260611/write/infolog.txt`.
+  It used `api-load target=180 accepted=1`, checkpoint `180`, catch-up `0`, no
+  legacy skip/command fallback, and logged `Defense Range GL4 cleared range
+  state` plus `Attack Range GL4 cleared range state` through frame `480`.
+  The reached screenshot at frame `188` was clean; the frame `360` screenshot
+  stayed inside the cleanup window and no longer showed the old polygon sheets.
+- Past-window visual smoke verified the range widgets rebuild cleanly after the
+  cleanup window:
+  `.cache/replay-timeline-smoke/run_20260610_223907_timeline_visual_cleanup_range_rebuild_20260611/write/infolog.txt`.
+  Defense ranges rebuilt and attack ranges queued selection rebuild at frame
+  `481`; the post-target screenshot at frame `543` showed normal battle
+  rendering without the magenta/green sheet or imploding geometry artifacts.
+  These two runs are visual/API regression evidence only; sync authority still
+  comes from the SYNCCHECK runs on clean fixtures.
+- Fresh current-worktree fixture recorded after the harness hardening:
+  `.cache/replay-timeline-synctest/run_20260611_155032`, duration `1500`, seed
+  `1776250575`, recorded digest `1ElWoXMT4nW/SjOg0lZhCA==` for `0..1499`, and
+  checkpoint bundle `rcp_6111dfdf.replay-checkpoints` with `19` save files.
+  The recording marker scan found no archive-copy warning.
+- Fresh forward API/SYNCCHECK smoke on that fixture:
+  `.cache/replay-timeline-smoke/run_20260611_155032_timeline_forward_fresh_api_sync_20260611/write/infolog.txt`.
+  It required checkpoint restore, API load, synctest markers, and sync hash;
+  target `1200` resolved to checkpoint `1170`, `api-load target=1200
+  accepted=1`, no `command-load` fallback, no `skip-request`, bounded catch-up
+  `30`, exact reached marker `current=1200 target=1200 paused=0`, and restored
+  digest `rJ3pD3afQ5t3xjHCSl7AwQ==` matched recorded frames `1170..1499`.
+- Fresh backward API/SYNCCHECK smoke on that fixture:
+  `.cache/replay-timeline-smoke/run_20260611_155032_timeline_backward_fresh_api_sync_20260611/write/infolog.txt`.
+  It required checkpoint restore, API load, synctest markers, and sync hash;
+  target `180` resolved to checkpoint `180`, `api-load target=180 accepted=1`,
+  no `command-load` fallback, no `skip-request`, catch-up span `0`, and
+  restored digest `uwYRIjtUtKJgWnHDj29Piw==` matched recorded frames
+  `180..1499`.
+- Fresh paused/manual-button API/SYNCCHECK smoke on that fixture:
+  `.cache/replay-timeline-smoke/run_20260611_155032_timeline_forward_fresh_pause_button_sync_20260611/write/infolog.txt`.
+  It required checkpoint restore, API load, synctest markers, sync hash, manual
+  pause before jumping, expected restored pause state `1`, and resume after the
+  exact reached marker. The log shows `pause-api source=manual-button paused=1
+  accepted=1`, target `1200` resolved to checkpoint `1170`, bounded catch-up
+  `30`, target re-pause at `current=1200 target=1200 paused=1`, no
+  `command-load` or `skip-request`, and restored digest
+  `rJ3pD3afQ5t3xjHCSl7AwQ==` matched recorded frames `1170..1499`.
+- Fresh forward visual+SYNCCHECK smoke after range cleanup:
+  `.cache/replay-timeline-smoke/run_20260611_155032_timeline_forward_fresh_visual_sync_after_range_cleanup_20260611/write/infolog.txt`.
+  It required checkpoint restore, Lua API, screenshots, synctest markers, and
+  sync hash for `30 -> 1200`, resolved checkpoint `1170`, ran bounded catch-up
+  `30`, reached exact `current=1200 target=1200 paused=0`, logged range
+  cleanup through frame `1470` and range rebuild at frame `1471`, and matched
+  digest `rJ3pD3afQ5t3xjHCSl7AwQ==` for frames `1170..1499`.
+  Reached/post-target screenshots were visually clean with the raised timeline
+  visible, GUI Shader `rects=0`, and no legacy skip or command fallback.
+- Fresh backward visual+SYNCCHECK smoke after range cleanup:
+  `.cache/replay-timeline-smoke/run_20260611_155032_timeline_backward_fresh_visual_sync_after_range_cleanup_20260611/write/infolog.txt`.
+  It required checkpoint restore, Lua API, screenshots, synctest markers, and
+  sync hash for `1200 -> 180`, resolved checkpoint `180`, catch-up span `0`,
+  reached the target window with `current=181 target=180 paused=0`, logged
+  range cleanup through frame `480` and range rebuild at frame `481`, and
+  matched digest `uwYRIjtUtKJgWnHDj29Piw==` for frames `180..1499`.
+  Reached/post-target screenshots were visually clean with the raised timeline
+  visible, GUI Shader `rects=0`, and no legacy skip or command fallback.
+- Fresh paused forward visual+SYNCCHECK smoke after range cleanup:
+  `.cache/replay-timeline-smoke/run_20260611_155032_timeline_forward_fresh_pause_visual_sync_after_range_cleanup_20260611/write/infolog.txt`.
+  It used the manual pause-button helper, required checkpoint restore, Lua API,
+  screenshots, synctest markers, sync hash, expected restored pause state `1`,
+  and resume after the exact reached marker. The run resolved `1200` to
+  checkpoint `1170`, caught up `30` frames, reached exact
+  `current=1200 target=1200 paused=1`, cleaned/rebuilt range widgets through
+  frame `1470/1471`, and matched digest `rJ3pD3afQ5t3xjHCSl7AwQ==` for
+  frames `1170..1499`. Reached/post-target screenshots were clean with the
+  raised timeline visible and no legacy skip or command fallback.
+- Fresh paused backward visual+SYNCCHECK smoke:
+  `.cache/replay-timeline-smoke/run_20260611_155032_timeline_backward_fresh_pause_visual_sync_20260611/write/infolog.txt`.
+  It used the manual pause-button helper, required checkpoint restore, Lua API,
+  screenshots, synctest markers, sync hash, expected restored pause state `1`,
+  and resume after the exact reached marker. The run resolved `180` to
+  checkpoint `180`, catch-up span `0`, reached exact
+  `current=180 target=180 paused=1`, resumed from frame `180`, rebuilt range
+  widgets after the cleanup window, and matched digest
+  `uwYRIjtUtKJgWnHDj29Piw==` for frames `180..1499`. The reached screenshot is
+  visually dark at the early battle state but keeps the raised timeline visible,
+  GUI Shader reports `rects=0`, and the run has no legacy skip or command
+  fallback.
+- Fresh transition v3 visual+SYNCCHECK smoke after range cleanup:
+  `.cache/replay-timeline-smoke/run_20260611_155032_timeline_forward_fresh_transition_v3_visual_sync_20260611/write/infolog.txt`.
+  It enabled `ReplayCheckpointTransition`, required checkpoint restore, Lua API,
+  transition draw, screenshots, synctest markers, and sync hash for
+  `390 -> 1200`. The log shows transition start `target=1200 request=390`,
+  transition draw at frame `1170`, API load accepted, checkpoint `1170`,
+  bounded catch-up `30`, exact reached
+  `current=1200 target=1200 paused=0`, clean GUI Shader dumps with `rects=0`,
+  range rebuild at frame `1471`, and digest `rJ3pD3afQ5t3xjHCSl7AwQ==` for
+  frames `1170..1499`. The reached screenshot visibly shows `TIME MACHINE
+  ONLINE`, radial rings/spokes, and `FORWARD +810f`, keeps the raised timeline
+  visible, and has no legacy skip or command fallback.
+- Fresh transition text/screenshot gate after moving transition text to
+  `gl.Text` with inline color codes:
+  `.cache/replay-timeline-smoke/run_20260611_155032_timeline_forward_transition_gltext_color_sync_20260611/write/infolog.txt`.
+  It required checkpoint restore, Lua API, checkpoint markers, transition draw,
+  screenshots, synctest markers, and sync hash; restored `390 -> 1200` through
+  checkpoint `1170`, bounded catch-up `30`, exact reached
+  `current=1200 target=1200 paused=0`, and matched digest
+  `rJ3pD3afQ5t3xjHCSl7AwQ==` for `1170..1499`. Focused scan found
+  `api_loads=1`, `command_loads=0`, `skip_requests=0`,
+  `paused_failures=0`, and no desync/checksum or Lua restore-error patterns.
+  Reached screenshot `screen_2026-06-11_19-00-44-870.png` shows readable
+  `TIME MACHINE ONLINE`, `FORWARD +810f`, rings/panel, and checkpoint ticks.
+- Fresh checkpoint-marker visual+SYNCCHECK smoke:
+  `.cache/replay-timeline-smoke/run_20260611_155032_timeline_forward_fresh_checkpoint_markers_visual_sync_20260611/write/infolog.txt`.
+  This requires the new checkpoint availability marker from BAR:
+  `[ReplayTimelineCheckpoints] loaded count=`. The run used
+  `Spring.GetReplayCheckpoints()` to load `19` bundled frames (`first=90`,
+  `last=1710`), used `Spring.LoadReplayCheckpoint(1200)`, restored checkpoint
+  `1170`, caught up `30` frames, reached exact
+  `current=1200 target=1200 paused=0`, drew the transition at frame `1170`,
+  and matched digest `rJ3pD3afQ5t3xjHCSl7AwQ==` for frames `1170..1499`.
+  A focused negative scan found no desync, sync/checksum mismatch, Lua call-in,
+  stale unit, legacy `skip-request`, or command-fallback markers. The reached
+  screenshot shows the raised timeline with checkpoint tick marks, keeping the
+  UI evidence tied to engine-owned checkpoint frames.
+- Fresh paused catch-up settle-budget smoke:
+  `.cache/replay-timeline-smoke/run_20260611_155032_timeline_forward_fresh_pause_settle_checks_sync_20260611/write/infolog.txt`.
+  This covers the paused forward path after replacing pause/speed CPU-time
+  settle fallbacks with explicit update-count budgets and a hard
+  `[ReplayTimelinePausedCatchup] failed` marker. The run used the manual
+  pause-button helper, API load, checkpoint `1170`, bounded catch-up `30`,
+  exact target pause `current=1200 target=1200 paused=1`, resume from `1200`,
+  screenshots with the raised timeline and checkpoint ticks visible, and digest
+  `rJ3pD3afQ5t3xjHCSl7AwQ==` for `1170..1499`. A focused negative scan found
+  no paused-catchup failure, desync, sync/checksum mismatch, Lua call-in, stale
+  unit, legacy skip, or command fallback markers.
+- Fresh strict manual-demo launcher gate:
+  `.cache/replay-timeline-synctest/run_20260611_155032/replay_timeline_demo_write_demo_launcher_strict_api_markers_20260611/infolog.txt`.
+  The launcher ran auto-quit with `-RequireCheckpointJump`,
+  `-RequireCheckpointApi`, and `-RequireCheckpointMarkers`; the post-run summary
+  counted `selftest_checkpoint_requests=1`, `restore_resolutions=1`,
+  `restored_checkpoints=1`, `transition_starts=1`, `transition_draws=1`,
+  `checkpoint_markers=2`, `api_loads=1`, `command_loads=0`,
+  `skip_requests=0`, `paused_catchup_failures=0`,
+  `desync_or_mismatch_patterns=0`, `lua_error_patterns=0`, and
+  `max_catchup_span=30`. It restored target `1200` through checkpoint `1170`
+  and loaded `19` timeline checkpoints (`first=90 last=1710`). This keeps the
+  hand-demo launcher honest about API-owned jumps and visible checkpoint ticks;
+  physical click feel still needs a real manual pass.
+- Fresh screenshot-gated manual-demo launcher run:
+  `.cache/replay-timeline-synctest/run_20260611_155032/replay_timeline_demo_write_demo_launcher_screenshot_gate_gltext_color_20260611/infolog.txt`.
+  The new `-CaptureScreenshots` launcher gate requires timeline screenshot
+  markers, deferred screenshot capture, GUI Shader reached debug dump, and at
+  least two PNGs. This run reported `screenshot_requests=2`,
+  `screenshot_captures=1`, `guishader_debug_dumps=2`, `api_loads=1`,
+  `checkpoint_markers=2`, `command_loads=0`, and no bad Lua/sync patterns; it
+  saved `screen_2026-06-11_18-55-02-604.png` with readable transition text.
+- Fresh widget-click visual+SYNCCHECK smoke:
+  `.cache/replay-timeline-smoke/run_20260611_155032_timeline_forward_click_path_visual_sync_20260611/write/infolog.txt`.
+  The new `-ViaTimelineClick` path sets
+  `ReplayTimelineSelfTestViaTimelineClick=1`, computes a timeline click point,
+  and dispatches through `widget:MousePress`/`frame_from_timeline_x` before the
+  checkpoint request. The run logged
+  `timeline-click current=390 target=1200 click_frame=1200 ... active=1`, used
+  API load, restored checkpoint `1170`, bounded catch-up `30`, exact reached
+  `current=1200 target=1200 paused=0`, saved clean readable transition/tick
+  screenshots including `screen_2026-06-11_19-30-26-352.png`, and matched digest
+  `rJ3pD3afQ5t3xjHCSl7AwQ==` for `1170..1499`. No legacy skip, command
+  fallback, paused-catchup failure, desync/checksum, or Lua error markers were
+  reported by the smoke gate.
+- Forward paused widget-click visual+SYNCCHECK smoke:
+  `.cache/replay-timeline-smoke/run_20260611_155032_timeline_forward_click_path_paused_visual_sync_20260611/write/infolog.txt`.
+  It combines `-ViaTimelineClick`, `-PauseViaButton`,
+  `-ResumeAfterReached`, and `ExpectedRestorePaused=1`. The run logged
+  `jump-dispatch current=390 target=1200 paused=1`,
+  `timeline-click current=390 target=1200 click_frame=1200 ... active=1`,
+  API load, checkpoint `1170`, bounded catch-up `30`, restored `paused 1`,
+  exact `reached current=1200 target=1200 paused=1`,
+  `resume-after-reached current=1200`, clean screenshots including
+  `screen_2026-06-11_20-05-16-429.png`, and digest
+  `rJ3pD3afQ5t3xjHCSl7AwQ==` for `1170..1499`.
+- Backward widget-click visual+SYNCCHECK smoke:
+  `.cache/replay-timeline-smoke/run_20260611_155032_timeline_backward_click_path_visual_sync_20260611/write/infolog.txt`.
+  This uses the same `-ViaTimelineClick` path for `1200 -> 180`; it logged
+  `timeline-click current=1200 target=180 click_frame=180 ... active=1`, used
+  API load, restored checkpoint `180`, preserved `paused=0`, reached marker
+  `current=181 target=180 paused=0` because the replay was running, saved clean
+  rewind/tick screenshots including `screen_2026-06-11_19-43-46-384.png`, and
+  matched digest `uwYRIjtUtKJgWnHDj29Piw==` for `180..1499`.
+- Paused backward widget-click regression and fix:
+  `.cache/replay-timeline-smoke/run_20260611_155032_timeline_backward_click_path_paused_visual_sync_20260611/write/infolog.txt`
+  failed with `Restored checkpoint paused state 0 did not match expected 1`.
+  Bug shape: the paused backward self-test started at frame `1200` with target
+  `180`, so the generic `frame >= target` reached check fired before the delayed
+  timeline click dispatched; `resume-after-reached` unpaused the replay, then
+  restore correctly preserved that unpaused state. The fix prevents reached
+  markers while `timelineSelfTestPendingJump` is true. Fixed evidence:
+  `.cache/replay-timeline-smoke/run_20260611_155032_timeline_backward_click_path_paused_visual_sync_fixed_20260611/write/infolog.txt`
+  logs `jump-dispatch current=1200 target=180 paused=1`,
+  `timeline-click ... click_frame=180`, API load, checkpoint `180`,
+  `restored ... paused 1`, exact `reached current=180 target=180 paused=1`,
+  `resume-after-reached current=180`, clean screenshots including
+  `screen_2026-06-11_19-56-58-937.png`, and digest
+  `uwYRIjtUtKJgWnHDj29Piw==` for `180..1499`.
+- Visual cleanup refresh regression: suppressing stale range/sensor VBO state is
+  not enough if the widget never rebuilds after the cleanup window, and stale
+  restore config must not activate cleanup before a new restore frame. The BAR
+  sensor range widgets now require `restoreFrame <= currentFrame <=
+  cleanupUntilFrame`, set a pending visible-unit refresh while cleanup is
+  active, and rebuild from `WG.unittrackerapi.visibleUnits` after the window.
+  The smoke/demo/checkpoint launch configs also reset restore serial/frame and
+  cleanup-until keys. Evidence:
+  `.cache/replay-timeline-smoke/run_20260611_155032_timeline_backward_click_visual_cleanup_refresh_rebuild_20260611/write/infolog.txt`
+  shows checkpoint API load for `1200 -> 180`, stale decal/range cleanup at
+  frame `180`, `Sensor Ranges Jammer/Radar/LOS rebuilt range state after visual
+  cleanup` plus attack/defense rebuild at frame `482`, clean reached/post-target
+  screenshots, no legacy skip or command fallback, and digest
+  `uwYRIjtUtKJgWnHDj29Piw==` for `180..1499`.
+
+Remaining seams:
+
+- The load-completion handoff now uses `ReplayCheckpointRestoreSerial` plus
+  `ReplayCheckpointRestoreTargetFrame` after engine restore. Paused catch-up now
+  has explicit settle budgets and a harness-rejected failure marker; remaining
+  timing cleanup should focus on self-test pause delays, preload exploration,
+  and screenshot friendliness.
+- Physical hand-demo clicks should still judge button feel, but fresh smokes now
+  cover forward/backward and paused/unpaused timeline `MousePress` paths before
+  the checkpoint request.
+- Opt-in preload evidence
+  `.cache/replay-checkpoint-smoke/run_20260610_223907_transition_preload_hold_20260611/write/infolog.txt`
+  proved `preload` and `load-dispatch` markers, but advanced the source replay
+  from frame `390` to `404` before dispatch. Keep preload disabled until pause
+  ownership/load dispatch has a stronger API seam.
+- Keep `run_20260610_223907` as a visual demo regression fixture. The full
+  screenshot+SYNCCHECK smoke covers the automated LuaUI path; the checkpoint and
+  timeline transition smokes cover automated overlay capture; and the timeline
+  screenshot smoke now suppresses/checks the endgame awards overlay so
+  post-target evidence remains about replay timeline visuals. Manual demo passes
+  should still decide whether normal awards/endgame UI should be visible or
+  suppressed.
 
 Future seams:
 
