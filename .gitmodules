@@ -20,7 +20,8 @@
 	url = https://github.com/gflags/gflags
 [submodule "rts/lib/entt"]
 	path = rts/lib/entt
-	url = https://github.com/skypjack/entt
+	url = https://github.com/tetrisface/entt.git
+	branch = recoil/preserve-live-entity-ids-v3.10
 [submodule "rts/lib/cereal"]
 	path = rts/lib/cereal
 	url = https://github.com/USCiLab/cereal.git
